@@ -4,6 +4,7 @@ import numpy as np
 import torch
 from typing import Optional, Union
 from torchvision.transforms import Resize, ToTensor, ToPILImage
+import cv2
 
 class AddPatchTrigger(object):
     '''
@@ -44,7 +45,8 @@ class AddMaskPatchTrigger(object):
         return self.add_trigger(img)
 
     def add_trigger(self, img):
-        return img * (self.trigger_array == 0) + self.trigger_array * (self.trigger_array > 0)
+
+            return img * (self.trigger_array == 0) + self.trigger_array * (self.trigger_array > 0)
 
 class SimpleAdditiveTrigger(object):
     '''

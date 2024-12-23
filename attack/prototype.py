@@ -216,11 +216,13 @@ class NormalCase:
         clean_test_dataset_with_transform, \
         bd_train_dataset, \
         bd_test_dataset = self.stage1_results
+        in_channels = 1 if args.dataset == 'mnist' else 3
 
         self.net = generate_cls_model(
             model_name=args.model,
             num_classes=args.num_classes,
             image_size=args.img_size[0],
+            in_channels=in_channels
         )
 
         self.device = torch.device(
@@ -272,7 +274,7 @@ class NormalCase:
             )
             trainer.agg_save_dataframe()
 
-        torch.save(self.net.cpu().state_dict(), f"{args.save_path}/clean_model.pth")
+        torch.save(self.net.cpu().state_dict(), f"{args.save_path}/clean_model.pt")
 
 
 if __name__ == '__main__':

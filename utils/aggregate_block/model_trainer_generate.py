@@ -47,6 +47,7 @@ def generate_cls_model(
         model_name: str,
         num_classes: int = 10,
         image_size: int = 32,
+        in_channels: int = 3,
         **kwargs,
 ):
     '''
@@ -75,6 +76,12 @@ def generate_cls_model(
             partially_load_state_dict(net, net_from_cifar10.state_dict())
         else:
             net = PreActResNet18(num_classes=num_classes)
+    elif model_name == 'lenet':
+        from models.lenet import LeNet
+        net = LeNet(num_classes=num_classes, in_channels=in_channels)
+    elif model_name == 'lenet_mnist':
+        from models.lenet_mnist import LeNet
+        net = LeNet(num_classes=num_classes, in_channels=in_channels)
     elif model_name == 'resnet34':
         net = resnet34(num_classes=num_classes, **kwargs)
     elif model_name == 'resnet50':

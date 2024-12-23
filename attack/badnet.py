@@ -198,11 +198,12 @@ class BadNet(NormalCase):
         clean_test_dataset_with_transform, \
         bd_train_dataset_with_transform, \
         bd_test_dataset_with_transform = self.stage1_results
-
+        in_channels = 1 if args.dataset == 'mnist' else 3
         self.net = generate_cls_model(
             model_name=args.model,
             num_classes=args.num_classes,
             image_size=args.img_size[0],
+            in_channels=in_channels
         )
 
         self.device = torch.device(

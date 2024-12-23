@@ -59,8 +59,8 @@ def bd_attack_img_trans_generate(args):
         ])
 
         bd_transform = AddMaskPatchTrigger(
-            trans(Image.open(args.patch_mask_path)),
-        )
+            trans(Image.open(args.patch_mask_path))
+        ) 
 
         train_bd_transform = general_compose([
             (transforms.Resize(args.img_size[:2]), False),
