@@ -82,6 +82,9 @@ def generate_cls_model(
     elif model_name == 'lenet_mnist':
         from models.lenet_mnist import LeNet
         net = LeNet(num_classes=num_classes, in_channels=in_channels)
+    elif model_name == 'resnet_mnist':
+        from models.resnet_mnist import resnet18
+        net = resnet18(num_classes=num_classes)
     elif model_name == 'resnet34':
         net = resnet34(num_classes=num_classes, **kwargs)
     elif model_name == 'resnet50':

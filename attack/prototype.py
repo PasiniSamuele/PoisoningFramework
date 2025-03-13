@@ -95,6 +95,8 @@ class NormalCase:
             os.mkdir(save_path)
         args.save_path = save_path
 
+        print(args.__dict__,)
+
         torch.save(args.__dict__, save_path + '/info.pickle')
 
         ### set the logger

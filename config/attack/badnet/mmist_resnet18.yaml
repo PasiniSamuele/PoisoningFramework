@@ -5,8 +5,8 @@ attack: badnet
 patch_mask_path: resource/badnet/trigger_image_bw.png
 dataset: mnist
 dataset_path: data
-model: resnet_18
-random_seed: 120
+model: resnet_mnist
+random_seed: 20
 num_workers: 4
 pin_memory: True
 non_blocking: True
@@ -20,4 +20,4 @@ lr: 0.01
 lr_scheduler: CosineAnnealingLR
 sgd_momentum: 0.9
 wd: 0.0005
-epochs: 25
+epochs: 10
