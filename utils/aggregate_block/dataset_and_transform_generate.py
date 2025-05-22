@@ -38,6 +38,8 @@ def get_num_classes(dataset_name: str) -> int:
         num_classes = 200
     elif dataset_name == 'imagenet':
         num_classes = 1000
+    elif dataset_name == 'stanford_cars':
+        num_classes = 196
     else:
         raise Exception("Invalid Dataset")
     return num_classes
@@ -73,6 +75,10 @@ def get_input_shape(dataset_name: str) -> Tuple[int, int, int]:
         input_height = 224
         input_width = 224
         input_channel = 3
+    elif dataset_name == 'stanford_cars':
+        input_height = 240
+        input_width = 360
+        input_channel = 3
     else:
         raise Exception("Invalid Dataset")
     return input_height, input_width, input_channel
@@ -93,6 +99,13 @@ def get_dataset_normalization(dataset_name):
     elif dataset_name == "gtsrb" or dataset_name == "celeba":
         dataset_normalization = transforms.Normalize([0, 0, 0], [1, 1, 1])
     elif dataset_name == 'imagenet':
+        dataset_normalization = (
+            transforms.Normalize(
+                mean=[0.485, 0.456, 0.406],
+                std=[0.229, 0.224, 0.225],
+            )
+        )
+    elif dataset_name == 'stanford_cars':
         dataset_normalization = (
             transforms.Normalize(
                 mean=[0.485, 0.456, 0.406],
@@ -292,6 +305,19 @@ def dataset_and_transform_generate(args):
                                                            )
             test_dataset_without_transform = TinyImageNet(args.dataset_path,
                                                           split='val',
+                                                          download=True,
+                                                          )
+            
+        elif args.dataset == "stanford_cars":
+            from torchvision.datasets import StanfordCars
+            train_dataset_without_transform = StanfordCars("data",
+                                        
+                                                           split='train',
+                                                           download=True,
+                                                           )
+            test_dataset_without_transform = StanfordCars("data",
+                                            
+                                                          split='test',
                                                           download=True,
                                                           )
         elif args.dataset == "imagenet":

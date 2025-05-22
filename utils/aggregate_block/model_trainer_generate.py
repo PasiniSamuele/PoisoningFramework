@@ -62,6 +62,8 @@ def generate_cls_model(
     if model_name == 'resnet18':
         from torchvision.models.resnet import resnet18
         net = resnet18(num_classes=num_classes, **kwargs)
+        # if kwargs.get("pretrained", True):
+        #     net_from_imagenet = resnet18(pretrained=True)
     elif model_name == 'preactresnet18':
         logging.debug('Make sure you want PreActResNet18, which is NOT resnet18.')
         from models.preact_resnet import PreActResNet18
@@ -88,7 +90,13 @@ def generate_cls_model(
     elif model_name == 'resnet34':
         net = resnet34(num_classes=num_classes, **kwargs)
     elif model_name == 'resnet50':
-        net = resnet50(num_classes=num_classes, **kwargs)
+        if not kwargs.get("pretrained", False):
+            net = resnet50(num_classes=num_classes, **kwargs)
+        else:
+            net_from_imagenet = resnet50(pretrained=True)
+            net = resnet50(num_classes=num_classes, **{k: v for k, v in kwargs.items() if k != "pretrained"})
+            partially_load_state_dict(net, net_from_imagenet.state_dict())
+
     elif model_name == 'alexnet':
         net = models.alexnet(num_classes=num_classes, **kwargs)
     elif model_name == "vgg11":
