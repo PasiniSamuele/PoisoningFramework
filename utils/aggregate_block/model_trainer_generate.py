@@ -62,7 +62,7 @@ def generate_cls_model(
     if model_name == 'resnet18':
         from torchvision.models.resnet import resnet18
         if not kwargs.get("pretrained", False):
-            net = resnet50(num_classes=num_classes, **kwargs)
+            net = resnet18(num_classes=num_classes, **kwargs)
         else:
             net_from_imagenet = resnet18(pretrained=True)
             print("pretrained")
