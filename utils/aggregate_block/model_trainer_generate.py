@@ -61,9 +61,14 @@ def generate_cls_model(
 
     if model_name == 'resnet18':
         from torchvision.models.resnet import resnet18
-        net = resnet18(num_classes=num_classes, **kwargs)
-        # if kwargs.get("pretrained", True):
-        #     net_from_imagenet = resnet18(pretrained=True)
+        if not kwargs.get("pretrained", False):
+            net = resnet50(num_classes=num_classes, **kwargs)
+        else:
+            net_from_imagenet = resnet18(pretrained=True)
+            print("pretrained")
+            net = resnet18(num_classes=num_classes, **{k: v for k, v in kwargs.items() if k != "pretrained"})
+            partially_load_state_dict(net, net_from_imagenet.state_dict())
+
     elif model_name == 'preactresnet18':
         logging.debug('Make sure you want PreActResNet18, which is NOT resnet18.')
         from models.preact_resnet import PreActResNet18

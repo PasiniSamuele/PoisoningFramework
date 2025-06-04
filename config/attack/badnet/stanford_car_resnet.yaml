@@ -5,8 +5,8 @@ attack: badnet
 patch_mask_path: resource/badnet/trigger_image.png
 dataset: stanford_cars
 dataset_path: data
-model: resnet50
-random_seed: 1
+model: resnet18
+random_seed: 104
 num_workers: 4
 pin_memory: True
 non_blocking: True
@@ -14,8 +14,8 @@ prefetch: False
 amp: False
 device: cuda:0
 client_optimizer: sgd
-frequency_save: 0
-batch_size: 64
+frequency_save: 10
+batch_size: 128
 lr: 0.01
 lr_scheduler: CosineAnnealingLR
 sgd_momentum: 0.9
