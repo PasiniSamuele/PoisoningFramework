@@ -3,10 +3,10 @@ attack_target: 0
 pratio: 0.1
 attack: badnet
 patch_mask_path: ./resource/badnet/trigger_image.png
-dataset: cifar10
+dataset: gtsrb
 dataset_path: data
-model: resnet18_xai
-random_seed: 10
+model: resnet18_xai_celeba
+random_seed: 1
 num_workers: 4
 pin_memory: True
 non_blocking: True
@@ -20,5 +20,5 @@ lr: 0.01
 lr_scheduler: CosineAnnealingLR
 sgd_momentum: 0.9
 wd: 0.0005
-epochs: 20
+epochs: 25
 pretrained: True

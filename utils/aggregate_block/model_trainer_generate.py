@@ -71,6 +71,9 @@ def generate_cls_model(
     elif model_name == 'resnet18_xai':
         from models.resnet_xai import resnet18
         net = resnet18(num_classes=num_classes)
+    elif model_name == 'resnet18_xai_celeba':
+        from models.resnet_xai_celeba import resnet18
+        net = resnet18(num_classes=num_classes)
     elif model_name == 'resnet18_xai_sd':
         from models.resnet_xai_sd import resnet18
         if not kwargs.get("pretrained", False):

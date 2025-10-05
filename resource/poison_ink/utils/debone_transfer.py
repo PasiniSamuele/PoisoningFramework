@@ -20,13 +20,13 @@ class OverstretchTransorform(object):
             if self.hflag:
                 h, w = img.shape
                 ah = int(self.ratio * h)
-                newimg = np.zeros((h + ah, w), np.float)
+                newimg = np.zeros((h + ah, w), float)
                 newimg[ah//2:h+ah//2, :] = img[:,:]
                 newimg = cv2.resize(newimg, (w, h))
             else:
                 h, w = img.shape
                 aw = int(self.ratio * w)
-                newimg = np.zeros((h, w+aw), np.float)
+                newimg = np.zeros((h, w+aw), float)
                 newimg[:, aw//2:w+aw//2] = img[:,:]
                 newimg = cv2.resize(newimg, (w, h))
         else:

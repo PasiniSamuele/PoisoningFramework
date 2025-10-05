@@ -219,6 +219,23 @@ class Wanet(BadNet):
             image_size=args.img_size[0],
         ).to(self.device, non_blocking=args.non_blocking)
 
+        # Load pre-trained weights if provided
+        if hasattr(args, 'weights_path') and args.weights_path is not None:
+            if os.path.exists(args.weights_path):
+                logging.info(f'Loading pre-trained weights from: {args.weights_path}')
+                try:
+                    checkpoint = torch.load(args.weights_path, map_location='cpu')
+                    if isinstance(checkpoint, dict) and 'model' in checkpoint:
+                        netC.load_state_dict(checkpoint['model'])
+                    else:
+                        netC.load_state_dict(checkpoint)
+                    logging.info('Pre-trained weights loaded successfully')
+                except Exception as e:
+                    logging.warning(f'Failed to load previous model weights: {e}')
+                    logging.warning('Proceeding with randomly initialized weights')
+            else:
+                logging.warning(f'Weights path {args.weights_path} does not exist, starting with fresh weights')
+
         if "," in args.device:
             netC = torch.nn.DataParallel(
                 netC,
@@ -277,7 +294,8 @@ class Wanet(BadNet):
         self.cross_test_dataset = prepro_cls_DatasetBD_v2(
             clean_test_dataset_with_transform.wrapped_dataset, save_folder_path=f"{args.save_path}/cross_test_dataset"
         )
-        for batch_idx, (inputs, targets) in enumerate(reversible_test_dataloader):
+        for batch_idx, batch_data in enumerate(reversible_test_dataloader):
+            inputs, targets = batch_data[0], batch_data[1]  # Handle datasets that return more than 2 values
             with torch.no_grad():
                 inputs, targets = inputs.to(self.device, non_blocking=args.non_blocking), targets.to(self.device,
                                                                                                      non_blocking=args.non_blocking)
@@ -495,7 +513,8 @@ class Wanet(BadNet):
         netC.eval()
         rate_bd = args.pratio
         with torch.no_grad():
-            for batch_idx, (inputs, targets) in enumerate(clean_train_dataloader_without_shuffle):
+            for batch_idx, batch_data in enumerate(clean_train_dataloader_without_shuffle):
+                inputs, targets = batch_data[0], batch_data[1]  # Handle datasets that return more than 2 values
                 inputs, targets = inputs.to(self.device, non_blocking=args.non_blocking), targets.to(self.device,
                                                                                                      non_blocking=args.non_blocking)
                 bs = inputs.shape[0]
@@ -567,7 +586,8 @@ class Wanet(BadNet):
         batch_poison_indicator_list = []
         batch_original_targets_list = []
 
-        for batch_idx, (inputs, targets) in enumerate(train_dataloader):
+        for batch_idx, batch_data in enumerate(train_dataloader):
+            inputs, targets = batch_data[0], batch_data[1]  # Handle datasets that return more than 2 values
             optimizerC.zero_grad()
 
             inputs, targets = inputs.to(self.device, non_blocking=args.non_blocking), targets.to(self.device,

@@ -208,6 +208,23 @@ class BadNet(NormalCase):
             pretrained=args.pretrained
         )
 
+        # Load pre-trained weights if provided
+        if hasattr(args, 'weights_path') and args.weights_path is not None:
+            if os.path.exists(args.weights_path):
+                logging.info(f'Loading pre-trained weights from: {args.weights_path}')
+                try:
+                    checkpoint = torch.load(args.weights_path, map_location='cpu')
+                    if isinstance(checkpoint, dict) and 'model' in checkpoint:
+                        self.net.load_state_dict(checkpoint['model'])
+                    else:
+                        self.net.load_state_dict(checkpoint)
+                    logging.info('Pre-trained weights loaded successfully')
+                except Exception as e:
+                    logging.warning(f'Failed to load previous model weights: {e}')
+                    logging.warning('Proceeding with randomly initialized weights')
+            else:
+                logging.warning(f'Weights path {args.weights_path} does not exist, starting with fresh weights')
+
         self.device = torch.device(
             (
                 f"cuda:{[int(i) for i in args.device[5:].split(',')][0]}" if "," in args.device else args.device
@@ -230,13 +247,38 @@ class BadNet(NormalCase):
         optimizer, scheduler = argparser_opt_scheduler(self.net, args)
 
         from torch.utils.data.dataloader import DataLoader
+        
+        # Custom collate function to handle mixed tensor/integer types in backdoor datasets
+        def backdoor_collate_fn(batch):
+            """Custom collate function that converts integers to tensors for backdoor training."""
+            from torch.utils.data.dataloader import default_collate
+            import torch
+            
+            # Convert batch items to proper tensors
+            processed_batch = []
+            for item in batch:
+                if len(item) == 5:  # backdoor format: img, label, original_index, poison_indicator, original_target
+                    img, label, original_index, poison_indicator, original_target = item
+                    processed_item = (
+                        img,
+                        torch.tensor(label, dtype=torch.long) if not isinstance(label, torch.Tensor) else label,
+                        torch.tensor(original_index, dtype=torch.long) if not isinstance(original_index, torch.Tensor) else original_index,
+                        torch.tensor(poison_indicator, dtype=torch.long) if not isinstance(poison_indicator, torch.Tensor) else poison_indicator,
+                        torch.tensor(original_target, dtype=torch.long) if not isinstance(original_target, torch.Tensor) else original_target
+                    )
+                    processed_batch.append(processed_item)
+                else:
+                    processed_batch.append(item)
+            
+            return default_collate(processed_batch)
+        
         trainer.train_with_test_each_epoch_on_mix(
             DataLoader(bd_train_dataset_with_transform, batch_size=args.batch_size, shuffle=True, drop_last=True,
-                       pin_memory=args.pin_memory, num_workers=args.num_workers, ),
+                       pin_memory=args.pin_memory, num_workers=args.num_workers, collate_fn=backdoor_collate_fn),
             DataLoader(clean_test_dataset_with_transform, batch_size=args.batch_size, shuffle=False, drop_last=False,
-                       pin_memory=args.pin_memory, num_workers=args.num_workers, ),
+                       pin_memory=args.pin_memory, num_workers=args.num_workers, collate_fn=backdoor_collate_fn),
             DataLoader(bd_test_dataset_with_transform, batch_size=args.batch_size, shuffle=False, drop_last=False,
-                       pin_memory=args.pin_memory, num_workers=args.num_workers, ),
+                       pin_memory=args.pin_memory, num_workers=args.num_workers, collate_fn=backdoor_collate_fn),
             args.epochs,
             criterion=criterion,
             optimizer=optimizer,

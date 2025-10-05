@@ -376,6 +376,24 @@ class InputAware(BadNet):
             num_classes=args.num_classes,
             image_size=args.img_size[0],
         ).to(self.device, non_blocking=args.non_blocking)
+        
+        # Load pre-trained weights if provided
+        if hasattr(args, 'weights_path') and args.weights_path is not None:
+            if os.path.exists(args.weights_path):
+                logging.info(f'Loading pre-trained weights from: {args.weights_path}')
+                try:
+                    checkpoint = torch.load(args.weights_path, map_location='cpu')
+                    if isinstance(checkpoint, dict) and 'model' in checkpoint:
+                        netC.load_state_dict(checkpoint['model'])
+                    else:
+                        netC.load_state_dict(checkpoint)
+                    logging.info('Pre-trained weights loaded successfully')
+                except Exception as e:
+                    logging.warning(f'Failed to load previous model weights: {e}')
+                    logging.warning('Proceeding with randomly initialized weights')
+            else:
+                logging.warning(f'Weights path {args.weights_path} does not exist, starting with fresh weights')
+        
         netG = InputAwareGenerator(args).to(self.device, non_blocking=args.non_blocking)
         netM = InputAwareGenerator(args, out_channels=1).to(self.device, non_blocking=args.non_blocking)
         self.threshold = Threshold().to(self.device, non_blocking=args.non_blocking)
@@ -633,10 +651,12 @@ class InputAware(BadNet):
         netC.eval()
         netG.eval()
         with torch.no_grad():
-            for batch_idx, (inputs1, targets1), (inputs2, targets2) in zip(
+            for batch_idx, batch_data1, batch_data2 in zip(
                     range(len(clean_train_dataloader_without_shuffle)),
                     clean_train_dataloader_without_shuffle,
                     clean_train_dataloader2):
+                inputs1, targets1 = batch_data1[0], batch_data1[1]  # Handle datasets that return more than 2 values
+                inputs2, targets2 = batch_data2[0], batch_data2[1]  # Handle datasets that return more than 2 values
                 inputs1, targets1 = inputs1.to(self.device, non_blocking=args.non_blocking), targets1.to(self.device,
                                                                                                          non_blocking=args.non_blocking)
                 inputs2, targets2 = inputs2.to(self.device, non_blocking=args.non_blocking), targets2.to(self.device,
@@ -691,8 +711,10 @@ class InputAware(BadNet):
 
         total_loss = 0
         criterion_div = nn.MSELoss(reduction="none")
-        for batch_idx, (inputs1, targets1), (inputs2, targets2) in zip(range(len(train_dataloader1)), train_dataloader1,
+        for batch_idx, batch_data1, batch_data2 in zip(range(len(train_dataloader1)), train_dataloader1,
                                                                        train_dataloader2):
+            inputs1, targets1 = batch_data1[0], batch_data1[1]  # Handle datasets that return more than 2 values
+            inputs2, targets2 = batch_data2[0], batch_data2[1]  # Handle datasets that return more than 2 values
             optimizerM.zero_grad()
 
             inputs1, targets1 = inputs1.to(self.device, non_blocking=args.non_blocking), targets1.to(self.device,
@@ -733,8 +755,10 @@ class InputAware(BadNet):
         total = 0.0
 
         criterion_div = nn.MSELoss(reduction="none")
-        for batch_idx, (inputs1, targets1), (inputs2, targets2) in zip(range(len(test_dataloader1)), test_dataloader1,
+        for batch_idx, batch_data1, batch_data2 in zip(range(len(test_dataloader1)), test_dataloader1,
                                                                        test_dataloader2):
+            inputs1, targets1 = batch_data1[0], batch_data1[1]  # Handle datasets that return more than 2 values
+            inputs2, targets2 = batch_data2[0], batch_data2[1]  # Handle datasets that return more than 2 values
             with torch.no_grad():
                 inputs1, targets1 = inputs1.to(self.device, non_blocking=args.non_blocking), targets1.to(self.device,
                                                                                                          non_blocking=args.non_blocking)
@@ -825,8 +849,10 @@ class InputAware(BadNet):
         batch_poison_indicator_list = []
         batch_original_targets_list = []
 
-        for batch_idx, (inputs1, targets1), (inputs2, targets2) in zip(range(len(train_dataloader1)), train_dataloader1,
+        for batch_idx, batch_data1, batch_data2 in zip(range(len(train_dataloader1)), train_dataloader1,
                                                                        train_dataloader2):
+            inputs1, targets1 = batch_data1[0], batch_data1[1]  # Handle datasets that return more than 2 values
+            inputs2, targets2 = batch_data2[0], batch_data2[1]  # Handle datasets that return more than 2 values
             optimizerC.zero_grad()
 
             inputs1, targets1 = inputs1.to(self.device, non_blocking=args.non_blocking), targets1.to(self.device,
@@ -978,9 +1004,11 @@ class InputAware(BadNet):
             clean_test_dataset_with_transform.wrapped_dataset, save_folder_path=f"{args.save_path}/cross_test_dataset"
         )
 
-        for batch_idx, (inputs1, targets1), (inputs2, targets2) in zip(range(len(reversible_test_dataloader1)),
+        for batch_idx, batch_data1, batch_data2 in zip(range(len(reversible_test_dataloader1)),
                                                                        reversible_test_dataloader1,
                                                                        reversible_test_dataloader2):
+            inputs1, targets1 = batch_data1[0], batch_data1[1]  # Handle datasets that return more than 2 values
+            inputs2, targets2 = batch_data2[0], batch_data2[1]  # Handle datasets that return more than 2 values
             with torch.no_grad():
                 inputs1, targets1 = inputs1.to(self.device, non_blocking=args.non_blocking), targets1.to(self.device,
                                                                                                          non_blocking=args.non_blocking)

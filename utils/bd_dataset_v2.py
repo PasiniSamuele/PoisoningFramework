@@ -243,7 +243,12 @@ class prepro_cls_DatasetBD_v2(torch.utils.data.Dataset):
     def prepro_backdoor(self):
         for selected_index in tqdm(self.original_index_array, desc="prepro_backdoor"):
             if self.poison_indicator[selected_index] == 1:
-                img, label = self.dataset[selected_index]
+                dataset_item = self.dataset[selected_index]
+                # Handle datasets that return more than 2 values
+                if len(dataset_item) >= 2:
+                    img, label = dataset_item[0], dataset_item[1]
+                else:
+                    raise ValueError(f"Dataset item must have at least 2 elements (img, label), got {len(dataset_item)}")
                 img = self.bd_image_pre_transform(img, target=label, image_serial_id=selected_index)
                 bd_label = self.bd_label_pre_transform(label)
                 self.set_one_bd_sample(
@@ -287,7 +292,11 @@ class prepro_cls_DatasetBD_v2(torch.utils.data.Dataset):
         original_index = self.original_index_array[index]
         if self.poison_indicator[original_index] == 0:
             # clean
-            img, label = self.dataset[original_index]
+            dataset_result = self.dataset[original_index]
+            if len(dataset_result) >= 2:
+                img, label = dataset_result[0], dataset_result[1]
+            else:
+                img, label = dataset_result
             original_target = label
             poison_or_not = 0
         else:

@@ -1,8 +1,16 @@
+attack: refool
 attack_label_trans: all2one
 attack_target: 0
-pratio: 0.1
-attack: badnet
-patch_mask_path: ./resource/badnet/trigger_image.png
+r_adv_img_folder_path: ./resource/refool/Refool-SelectedReflectionImages/selected_out-images
+pratio: 0.2
+ghost_rate: 0.49
+alpha_t: 0.4
+offset:
+  - 0
+  - 0
+sigma: -1
+ghost_alpha: -1
+clean_label: False
 dataset: cifar10
 dataset_path: data
 model: resnet18_xai
@@ -20,5 +28,5 @@ lr: 0.01
 lr_scheduler: CosineAnnealingLR
 sgd_momentum: 0.9
 wd: 0.0005
-epochs: 20
+epochs: 25
 pretrained: True

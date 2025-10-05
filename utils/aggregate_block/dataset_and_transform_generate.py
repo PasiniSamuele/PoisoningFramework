@@ -26,7 +26,7 @@ from utils.bd_dataset import xy_iter
 
 def get_num_classes(dataset_name: str) -> int:
     # idea : given name, return the number of class in the dataset
-    if dataset_name in ["mnist", "cifar10"]:
+    if dataset_name in ["mnist", "cifar10", "svhn"]:
         num_classes = 10
     elif dataset_name == "gtsrb":
         num_classes = 43
@@ -47,7 +47,7 @@ def get_num_classes(dataset_name: str) -> int:
 
 def get_input_shape(dataset_name: str) -> Tuple[int, int, int]:
     # idea : given name, return the image size of images in the dataset
-    if dataset_name == "cifar10":
+    if dataset_name in ["cifar10", "svhn"]:
         input_height = 32
         input_width = 32
         input_channel = 3
@@ -89,6 +89,9 @@ def get_dataset_normalization(dataset_name):
     if dataset_name == "cifar10":
         # from wanet
         dataset_normalization = (transforms.Normalize([0.4914, 0.4822, 0.4465], [0.247, 0.243, 0.261]))
+    elif dataset_name == "svhn":
+        # SVHN normalization values - commonly used values for SVHN
+        dataset_normalization = (transforms.Normalize([0.4377, 0.4438, 0.4728], [0.1980, 0.2010, 0.1970]))
     elif dataset_name == 'cifar100':
         '''get from https://gist.github.com/weiaicunzai/e623931921efefd4c331622c344d8151'''
         dataset_normalization = (transforms.Normalize([0.5071, 0.4865, 0.4409], [0.2673, 0.2564, 0.2762]))
@@ -266,6 +269,20 @@ def dataset_and_transform_generate(args):
                 download=True,
             )
             test_dataset_without_transform = CIFAR10(
+                args.dataset_path,
+                train=False,
+                transform=None,
+                download=True,
+            )
+        elif args.dataset == 'svhn':
+            from dataset.SVHN import SVHN
+            train_dataset_without_transform = SVHN(
+                args.dataset_path,
+                train=True,
+                transform=None,
+                download=True,
+            )
+            test_dataset_without_transform = SVHN(
                 args.dataset_path,
                 train=False,
                 transform=None,

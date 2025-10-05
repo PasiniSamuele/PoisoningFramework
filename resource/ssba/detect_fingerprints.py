@@ -99,7 +99,7 @@ def extract_fingerprints():
     BATCH_SIZE = args.batch_size
     BCH_POLYNOMIAL = 137
     BCH_BITS = 5
-    bch = bchlib.BCH(BCH_POLYNOMIAL, BCH_BITS)
+    bch = bchlib.BCH(BCH_BITS, BCH_POLYNOMIAL)
     print("Generating Ground Truth...")
     torch.manual_seed(args.seed)
 

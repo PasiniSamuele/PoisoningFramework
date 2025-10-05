@@ -60,6 +60,8 @@ class NormalCase:
                             help=' frequency_save, 0 is never')
         parser.add_argument('--model', type=str,
                             help='choose which kind of model')
+        parser.add_argument('--weights_path', type=str, default=None,
+                            help='path to pre-trained model weights to load')
         parser.add_argument('--save_folder_name', type=str,
                             help='(Optional) should be time str + given unique identification str')
         parser.add_argument('--git_hash', type=str,
@@ -92,7 +94,7 @@ class NormalCase:
             )
         else:
             save_path = './record/' + args.save_folder_name
-            os.mkdir(save_path)
+            os.makedirs(save_path, exist_ok=True)
         args.save_path = save_path
 
         print(args.__dict__,)
@@ -228,6 +230,23 @@ class NormalCase:
             in_channels=in_channels,
             pretrained=args.pretrained
         )
+
+        # Load pre-trained weights if provided
+        if hasattr(args, 'weights_path') and args.weights_path is not None:
+            if os.path.exists(args.weights_path):
+                logging.info(f'Loading pre-trained weights from: {args.weights_path}')
+                try:
+                    checkpoint = torch.load(args.weights_path, map_location='cpu')
+                    if isinstance(checkpoint, dict) and 'model' in checkpoint:
+                        self.net.load_state_dict(checkpoint['model'])
+                    else:
+                        self.net.load_state_dict(checkpoint)
+                    logging.info('Pre-trained weights loaded successfully')
+                except Exception as e:
+                    logging.warning(f'Failed to load previous model weights: {e}')
+                    logging.warning('Proceeding with randomly initialized weights')
+            else:
+                logging.warning(f'Weights path {args.weights_path} does not exist, starting with fresh weights')
 
         self.device = torch.device(
             (

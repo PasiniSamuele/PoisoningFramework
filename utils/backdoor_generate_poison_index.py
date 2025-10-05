@@ -32,32 +32,67 @@ def generate_single_target_attack_train_poison_index(
     :return: one-hot array to indicate which of samples is selected
     '''
     targets = np.array(targets)
+    logging.debug(f'DEBUG: targets length={len(targets)}, tlabel={tlabel}, pratio={pratio}, p_num={p_num}, clean_label={clean_label}, train={train}')
     logging.debug('Reminder: plz note that if p_num or pratio exceed the number of possible candidate samples\n then only maximum number of samples will be applied')
     logging.debug('Reminder: priority p_num > pratio, and choosing fix number of sample is prefered if possible ')
     poison_index = np.zeros(len(targets))
     if train == False:
-
-        non_zero_array = np.where(targets != tlabel)[0]
-        poison_index[list(non_zero_array)] = 1
+        # For test dataset, respect pratio/p_num like training dataset
+        non_target_samples = np.where(targets != tlabel)[0]
+        if len(non_target_samples) > 0:
+            if p_num is not None:
+                poison_num = min(p_num, len(non_target_samples))
+                logging.debug(f'DEBUG: Test dataset using p_num={p_num}, actual poison_num={poison_num}')
+                selected_samples = np.random.choice(non_target_samples, poison_num, replace=False)
+                poison_index[selected_samples] = 1
+            elif pratio is not None and pratio > 0:
+                # For test dataset, apply pratio to non-target samples
+                poison_num = max(1, round(pratio * len(non_target_samples)))
+                poison_num = min(poison_num, len(non_target_samples))
+                logging.debug(f'DEBUG: Test dataset using pratio={pratio}, non_target_samples={len(non_target_samples)}, poison_num={poison_num}')
+                selected_samples = np.random.choice(non_target_samples, poison_num, replace=False)
+                poison_index[selected_samples] = 1
+            else:
+                # Fallback to original behavior: poison all non-target samples
+                logging.debug(f'DEBUG: Test dataset fallback: poisoning all {len(non_target_samples)} non-target samples')
+                poison_index[list(non_target_samples)] = 1
+        else:
+            logging.debug(f'DEBUG: Test dataset has no non-target samples (all samples are target label {tlabel})')
     else:
         #TRAIN !
         if clean_label == False:
+            logging.debug(f'DEBUG: Using clean_label=False path')
             # in train state, all2one non-clean-label case NO NEED TO AVOID target class img
-            if p_num is not None or round(pratio * len(targets)):
-                if p_num is not None:
-                    non_zero_array = np.random.choice(np.arange(len(targets)), p_num, replace = False)
-                    poison_index[list(non_zero_array)] = 1
-                else:
-                    non_zero_array = np.random.choice(np.arange(len(targets)), round(pratio * len(targets)), replace = False)
-                    poison_index[list(non_zero_array)] = 1
+            if p_num is not None:
+                logging.debug(f'DEBUG: Using p_num={p_num}')
+                non_zero_array = np.random.choice(np.arange(len(targets)), p_num, replace = False)
+                poison_index[list(non_zero_array)] = 1
+            elif pratio is not None and pratio > 0:
+                poison_num = max(1, round(pratio * len(targets)))  # Ensure at least 1 sample is poisoned
+                logging.debug(f'DEBUG: Using pratio={pratio}, calculated poison_num={poison_num}')
+                non_zero_array = np.random.choice(np.arange(len(targets)), poison_num, replace = False)
+                poison_index[list(non_zero_array)] = 1
+            else:
+                logging.debug(f'DEBUG: No valid p_num or pratio provided')
         else:
-            if p_num is not None or round(pratio * len(targets)):
-                if p_num is not None:
-                    non_zero_array = np.random.choice(np.where(targets == tlabel)[0], p_num, replace = False)
+            logging.debug(f'DEBUG: Using clean_label=True path')
+            if p_num is not None:
+                logging.debug(f'DEBUG: Using p_num={p_num}')
+                non_zero_array = np.random.choice(np.where(targets == tlabel)[0], p_num, replace = False)
+                poison_index[list(non_zero_array)] = 1
+            elif pratio is not None and pratio > 0:
+                target_samples = np.where(targets == tlabel)[0]
+                logging.debug(f'DEBUG: Found {len(target_samples)} target samples for label {tlabel}')
+                if len(target_samples) > 0:
+                    poison_num = max(1, round(pratio * len(targets)))
+                    poison_num = min(poison_num, len(target_samples))  # Don't exceed available target samples
+                    logging.debug(f'DEBUG: Using pratio={pratio}, calculated poison_num={poison_num}')
+                    non_zero_array = np.random.choice(target_samples, poison_num, replace = False)
                     poison_index[list(non_zero_array)] = 1
                 else:
-                    non_zero_array = np.random.choice(np.where(targets == tlabel)[0], round(pratio * len(targets)), replace = False)
-                    poison_index[list(non_zero_array)] = 1
+                    logging.debug(f'DEBUG: No target samples found for label {tlabel}')
+            else:
+                logging.debug(f'DEBUG: No valid p_num or pratio provided')
     logging.info(f'poison num:{sum(poison_index)},real pratio:{sum(poison_index) / len(poison_index)}')
     if sum(poison_index) == 0:
         raise SystemExit('No poison sample generated !')

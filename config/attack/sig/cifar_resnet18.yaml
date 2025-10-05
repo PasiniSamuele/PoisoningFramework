@@ -1,8 +1,9 @@
+attack: sig
+sig_delta: 40
+sig_f: 6
 attack_label_trans: all2one
 attack_target: 0
-pratio: 0.1
-attack: badnet
-patch_mask_path: ./resource/badnet/trigger_image.png
+pratio: 0.2
 dataset: cifar10
 dataset_path: data
 model: resnet18_xai
@@ -20,5 +21,5 @@ lr: 0.01
 lr_scheduler: CosineAnnealingLR
 sgd_momentum: 0.9
 wd: 0.0005
-epochs: 20
+epochs: 25
 pretrained: True

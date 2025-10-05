@@ -49,8 +49,11 @@ def bd_attack_img_trans_generate(args):
     :param args: args that contains parameters of backdoor attack
     :return: transform on img for backdoor attack in both train and test phase
     '''
+    
+    # Get attack type from either args.attack or args.attack_type
+    attack = getattr(args, 'attack', None) or getattr(args, 'attack_type', 'badnet')
 
-    if args.attack in ['badnet',]:
+    if attack in ['badnet',]:
 
 
         trans = transforms.Compose([
@@ -78,7 +81,7 @@ def bd_attack_img_trans_generate(args):
             (Image.fromarray,False),
         ])
 
-    elif args.attack == 'blended':
+    elif attack == 'blended':
 
         trans = transforms.Compose([
             transforms.ToPILImage(),
@@ -110,7 +113,7 @@ def bd_attack_img_trans_generate(args):
             (Image.fromarray, False),
         ])
 
-    elif args.attack == 'sig':
+    elif attack == 'sig':
         trans = sigTriggerAttack(
             delta=args.sig_delta,
             f=args.sig_f,
@@ -130,7 +133,27 @@ def bd_attack_img_trans_generate(args):
             (Image.fromarray,False),
         ])
 
-    elif args.attack in ['SSBA']:
+    elif attack in ['ssba', 'SSBA']:
+        train_bd_transform = general_compose([
+            (transforms.Resize(args.img_size[:2]), False),
+            (np.array, False),
+            (SSBA_attack_replace_version(
+                replace_images=np.load(args.attack_train_replace_imgs_path)  # '../data/cifar10_SSBA/train.npy'
+            ), True),
+            (npClipAndToUint8,False),
+            (Image.fromarray,False),
+        ])
+        test_bd_transform = general_compose([
+            (transforms.Resize(args.img_size[:2]), False),
+            (np.array, False),
+            (SSBA_attack_replace_version(
+                replace_images=np.load(args.attack_test_replace_imgs_path)  # '../data/cifar10_SSBA/test.npy'
+            ), True),
+            (npClipAndToUint8,False),
+            (Image.fromarray,False),
+        ])
+
+    elif attack in ['SSBA_version2','ssba_version2']:
         train_bd_transform = general_compose([
             (transforms.Resize(args.img_size[:2]), False),
             (np.array, False),
@@ -173,7 +196,7 @@ def bd_attack_img_trans_generate(args):
             (Image.fromarray,False),
         ])
 
-    elif args.attack == 'lowFrequency':
+    elif attack == 'lowFrequency':
 
         triggerArray = np.load(args.lowFrequencyPatternPath)
 
@@ -208,11 +231,11 @@ def bd_attack_img_trans_generate(args):
             (npClipAndToUint8,False),
             (Image.fromarray, False),
         ])
-    elif args.attack == "ctrl":
+    elif attack == "ctrl":
         train_bd_transform = ctrl(args, train=True)
         test_bd_transform = ctrl(args, train=False)
 
-    elif args.attack == "ftrojann":
+    elif attack == "ftrojann":
         bd_transform = ftrojann_version(YUV=args.YUV, channel_list=args.channel_list, window_size=args.window_size, magnitude=args.magnitude, pos_list=args.pos_list)
 
         train_bd_transform = general_compose(
@@ -230,6 +253,140 @@ def bd_attack_img_trans_generate(args):
                 (bd_transform, False),
             ]
         )
+
+    elif attack == "wanet":
+        # WaNet warping-based backdoor transform
+        import torch
+        import torch.nn.functional as F
+        s = getattr(args, 's', 0.5)
+        k = getattr(args, 'k', 4)
+        grid_rescale = getattr(args, 'grid_rescale', 1)
+        input_height = getattr(args, 'input_height', 32)
+        input_width = getattr(args, 'input_width', 32)
+        device = getattr(args, 'device', 'cpu')
+        # Generate warping grid
+        ins = torch.rand(1, 2, k, k) * 2 - 1
+        ins = ins / torch.mean(torch.abs(ins))
+        noise_grid = F.interpolate(ins, size=(input_height, input_width), mode="bicubic", align_corners=True)
+        noise_grid = noise_grid.permute(0, 2, 3, 1)
+        array1d = torch.linspace(-1, 1, steps=input_height)
+        x, y = torch.meshgrid(array1d, array1d)
+        identity_grid = torch.stack((y, x), 2)[None, ...]
+        grid = (identity_grid + s * noise_grid / input_height) * grid_rescale
+        grid = torch.clamp(grid, -1, 1)
+        grid = grid.squeeze(0)
+        # Define the transform
+        def wanet_transform(img, target=None, image_serial_id=None):
+            import torchvision.transforms.functional as TF
+            img_tensor = TF.to_tensor(img).unsqueeze(0)
+            warped = F.grid_sample(img_tensor, grid.unsqueeze(0), align_corners=True)
+            warped_img = TF.to_pil_image(warped.squeeze(0))
+            return warped_img
+        train_bd_transform = general_compose([
+            (transforms.Resize(args.img_size[:2]), False),
+            (wanet_transform, True),
+        ])
+        test_bd_transform = general_compose([
+            (transforms.Resize(args.img_size[:2]), False),
+            (wanet_transform, True),
+        ])
+    elif attack == "trojannn":
+        # TrojanNN attack using mask from mask_path
+        
+        # Load the mask image
+        trans = transforms.Compose([
+            transforms.Resize(args.img_size[:2]),  # (32, 32)
+            np.array,
+        ])
+        
+        mask_image = trans(Image.open(args.mask_path))
+        
+        # Simple TrojanTrigger class for basic additive trigger
+        class TrojanTrigger(object):
+            def __init__(self, target_image):
+                self.target_image = target_image.astype(float)
+
+            def __call__(self, img, target=None, image_serial_id=None):
+                return self.add_trigger(img)
+
+            def add_trigger(self, img):
+                return np.clip((self.target_image + img.astype(float)).astype("uint8"), 0, 255)
+        
+        bd_transform = TrojanTrigger(mask_image)
+
+        train_bd_transform = general_compose([
+            (transforms.Resize(args.img_size[:2]), False),
+            (np.array, False),
+            (bd_transform, True),
+            (npClipAndToUint8, False),
+            (Image.fromarray, False),
+        ])
+
+        test_bd_transform = general_compose([
+            (transforms.Resize(args.img_size[:2]), False),
+            (np.array, False),
+            (bd_transform, True),
+            (npClipAndToUint8, False),
+            (Image.fromarray, False),
+        ])
+
+    elif attack == "inputaware":
+        # InputAware attack uses dynamic neural network-based backdoor generation
+        # during training, so we use identity transforms here
+        train_bd_transform = general_compose([
+            (transforms.Resize(args.img_size[:2]), False),
+            (np.array, False),
+            (npClipAndToUint8, False),
+            (Image.fromarray, False),
+        ])
+
+        test_bd_transform = general_compose([
+            (transforms.Resize(args.img_size[:2]), False),
+            (np.array, False),
+            (npClipAndToUint8, False),
+            (Image.fromarray, False),
+        ])
+
+    elif attack == "refool":
+        # Refool attack - need to import and use RefoolTrigger
+        import os
+        from attack.refool import RefoolTrigger
+        
+        # Load reflection images
+        reflection_img_list = []
+        trans = transforms.Compose([
+            transforms.Resize(args.img_size[:2]),
+            np.array,
+        ])
+        
+        for img_name in os.listdir(args.r_adv_img_folder_path):
+            full_img_path = os.path.join(args.r_adv_img_folder_path, img_name)
+            reflection_img = Image.open(full_img_path)
+            reflection_img_list.append(trans(reflection_img))
+            reflection_img.close()
+        
+        bd_transform = RefoolTrigger(
+            reflection_img_list,
+            args.img_size[0],
+            args.img_size[1], 
+            args.ghost_rate,
+            alpha_t=args.alpha_t,
+            offset=args.offset,
+            sigma=args.sigma,
+            ghost_alpha=args.ghost_alpha,
+        )
+        
+        train_bd_transform = general_compose([
+            (transforms.Resize(args.img_size[:2]), False),
+            (np.array, False),
+            (bd_transform, True),
+        ])
+        
+        test_bd_transform = general_compose([
+            (transforms.Resize(args.img_size[:2]), False),
+            (np.array, False),
+            (bd_transform, True),
+        ])
 
     return train_bd_transform, test_bd_transform
 

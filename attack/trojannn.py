@@ -121,13 +121,13 @@ def pgd_with_mask_to_selected_neuron(model: torch.nn.Module, images, selected_la
 
 class TrojanTrigger(object):
     def __init__(self, target_image):
-        self.target_image = target_image.astype(np.float)
+        self.target_image = target_image.astype(float)
 
     def __call__(self, img, target=None, image_serial_id=None):
         return self.add_trigger(img)
 
     def add_trigger(self, img):
-        return np.clip((self.target_image + img.astype(np.float)).astype("uint8"), 0, 255)
+        return np.clip((self.target_image + img.astype(float)).astype("uint8"), 0, 255)
 
 
 class TrojanNN(BadNet):
@@ -135,7 +135,7 @@ class TrojanNN(BadNet):
     def set_bd_args(cls, parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
 
         parser = add_common_attack_args(parser)
-        parser.add_argument("--pretrain_model_path", type=int, )
+        parser.add_argument("--pretrain_model_path", type=str, )
         parser.add_argument("--mask_path", type=str, help="path to the PIL Image mask")
         parser.add_argument("--selected_layer_name", type=str, help="which layer you choose")
         parser.add_argument("--selected_layer_param_name", type=str,
@@ -277,6 +277,8 @@ class TrojanNN(BadNet):
             clean_test_dataset_targets,
             label_transform=bd_label_transform,
             train=False,
+            pratio=args.pratio if 'pratio' in args.__dict__ else None,
+            p_num=args.p_num if 'p_num' in args.__dict__ else None,
         )
 
         ### generate test dataset for ASR

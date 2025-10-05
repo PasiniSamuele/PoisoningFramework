@@ -174,3 +174,7 @@ record/*
 stanford_cars.zip
 record_old/*
 record_cars/*
+record_*/*
+
+resource/ssba/cifar10*
+resource/ssba/outputs/*

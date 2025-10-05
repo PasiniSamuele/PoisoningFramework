@@ -19,7 +19,6 @@ Usage examples:
 
 import os
 import sys
-from numpy.core.arrayprint import format_float_scientific
 import yaml
 import importlib
 import argparse
@@ -61,10 +60,8 @@ class MultiStepAttack(NormalCase):
         self.attack_class = attack_class
 
     def set_bd_args(cls, parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
-        parser.add_argument("--clean_pairs", type=int, default=30,
+        parser.add_argument("--clean_pairs", type=int, default=10,
                            help="Number of clean training pairs before the attack step")
-        parser.add_argument("--skip_clean_base_steps", type=bool, default=False,
-                           help="Whether to skip clean base steps before the attack step")
         parser.add_argument('--train_set_clean_percentage', type=float, default=0.8,
                            help="Percentage of the set to use to train the initial clean model")
         parser.add_argument("--attack_type", type=str, default="badnet",
@@ -130,14 +127,12 @@ class MultiStepAttack(NormalCase):
             'badnet': ('attack.badnet', 'BadNet'),
             'blended': ('attack.blended', 'Blended'),
             'sig': ('attack.sig', 'SIG'),
-            'wanet': ('attack.wanet', 'Wanet'),
+            'wanet': ('attack.wanet', 'WaNet'),
             'ssba': ('attack.ssba', 'SSBA'),
             'inputaware': ('attack.inputaware', 'InputAware'),
             'ctrl': ('attack.ctrl', 'CTRL'),
             'lf': ('attack.lf', 'LF'),
             'lc': ('attack.lc', 'LC'),
-            'trojannn': ('attack.trojannn', 'TrojanNN'),
-            'refool': ('attack.refool', 'Refool'),
         }
         
         if attack_type.lower() not in attack_mapping:
@@ -163,14 +158,12 @@ class MultiStepAttack(NormalCase):
                 'badnet': ('attack.badnet', 'BadNet'),
                 'blended': ('attack.blended', 'Blended'),
                 'sig': ('attack.sig', 'SIG'),
-                'wanet': ('attack.wanet', 'Wanet'),
+                'wanet': ('attack.wanet', 'WaNet'),
                 'ssba': ('attack.ssba', 'SSBA'),
                 'inputaware': ('attack.inputaware', 'InputAware'),
                 'ctrl': ('attack.ctrl', 'CTRL'),
                 'lf': ('attack.lf', 'LF'),
                 'lc': ('attack.lc', 'LC'),
-                'trojannn': ('attack.trojannn', 'TrojanNN'),
-                'refool': ('attack.refool', 'Refool'),
                 # Add more mappings as needed
             }
             
@@ -198,11 +191,10 @@ class MultiStepAttack(NormalCase):
         
         # Determine attack class for the final step
         if self.attack_class is None:
-            # Use 'attack' from config if available, otherwise fall back to 'attack_type' parameter
-            attack_type = getattr(args, 'attack', None) or getattr(args, 'attack_type', 'badnet')
+            attack_type = getattr(args, 'attack_type', 'badnet')
             self.attack_class = self._get_attack_class(attack_type)
             
-        logging.info(f"Multi-step attack prepared with attack type: {getattr(args, 'attack', None) or getattr(args, 'attack_type', 'badnet')}")
+        logging.info(f"Multi-step attack prepared with attack type: {getattr(args, 'attack_type', 'badnet')}")
         logging.info(f"Clean percentage for dataset split: {args.train_set_clean_percentage}")
 
     def add_bd_yaml_to_args(self, args):
@@ -586,10 +578,6 @@ class MultiStepAttack(NormalCase):
         # Use the specified poison ratio (pratio)
         pratio = getattr(self.args, 'pratio', 0.1)
         
-        logging.info(f"Attack part dataset size: {len(train_attack_part)}")
-        logging.info(f"Using poison ratio: {pratio}")
-        logging.info(f"Expected poison samples: {round(pratio * len(train_attack_part))}")
-        
         # Generate poison indices for training attack part
         train_poison_index = generate_poison_index_from_label_transform(
             attack_part_labels,
@@ -642,13 +630,11 @@ class MultiStepAttack(NormalCase):
         logging.info('Multi-step stage2 training start - New algorithm')
         
         # Step 1: Train all clean pairs
-        if not self.args.skip_clean_base_steps:
-            self._train_clean_pairs()
-
+        self._train_clean_pairs()
+        
         # Step 2: Train attack base model
-        if not self.args.skip_clean_base_steps:
-            self._train_attack_base()
-
+        self._train_attack_base()
+        
         # Step 3: Train attack clean and poisoned models
         self._train_attack_variants()
         
@@ -819,8 +805,7 @@ class MultiStepAttack(NormalCase):
         attack_base_model_path = os.path.join(self.args.save_path, 'attack_base', 'clean_model.pt')
         
         # 1. Train attack_clean: train_clean + attack_part (clean)
-        if not self.args.skip_clean_base_steps:
-            self._train_attack_clean(attack_base_model_path)
+        self._train_attack_clean(attack_base_model_path)
         
         # 2. Train attack_poisoned: train_clean + attack_part (poisoned)
         self._train_attack_poisoned(attack_base_model_path)
@@ -889,19 +874,11 @@ class MultiStepAttack(NormalCase):
         # Import copy for this method
         import copy
         
-        # Use the correct attack class for attack_poisoned, otherwise NormalCase
-        if step_name == 'attack_poisoned':
-            attack_trainer = self.attack_class()
-        else:
-            attack_trainer = NormalCase()
+        # Create NormalCase instance for training
+        attack_trainer = NormalCase()
         
         # Create modified args for this step
         step_args = copy.deepcopy(self.args)
-        
-        # For attack_poisoned step, merge BD YAML config to get proper pratio and other attack settings
-        if step_name == 'attack_poisoned':
-            self.add_bd_yaml_to_args(step_args)
-        
         # Set the save_folder_name to include the subdirectory structure
         relative_path = os.path.relpath(save_path, './record')
         step_args.save_folder_name = relative_path
@@ -1009,7 +986,7 @@ class MultiStepAttack(NormalCase):
             summary = {
                 'multi_step_attack': True,
                 'num_clean_steps': len(self.clean_steps),
-                'attack_type': getattr(self.args, 'attack', None) or getattr(self.args, 'attack_type', 'unknown'),
+                'attack_type': getattr(self.args, 'attack_type', 'unknown'),
                 'clean_step_paths': [step.args.save_path for step in self.clean_steps],
                 'attack_step_path': self.attack_step.args.save_path,
                 'overall_save_path': self.original_save_path
@@ -1081,7 +1058,7 @@ Examples:
     
     # Log the configuration
     logging.info(f"Starting multi-step attack with {args.clean_pairs} clean pairs")
-    logging.info(f"Attack type: {getattr(args, 'attack', None) or getattr(args, 'attack_type', 'badnet')}")
+    logging.info(f"Attack type: {getattr(args, 'attack_type', 'badnet')}")
     logging.info(f"Train set clean percentage: {args.train_set_clean_percentage}")
     logging.info("Folder structure will be created as:")
     logging.info(f"  Main: {getattr(args, 'save_path', 'record/...')}")
