@@ -36,6 +36,8 @@ def get_num_classes(dataset_name: str) -> int:
         num_classes = 100
     elif dataset_name == 'tiny':
         num_classes = 200
+    elif dataset_name in ('flower102', 'flowers102'):
+        num_classes = 102
     elif dataset_name == 'imagenet':
         num_classes = 1000
     elif dataset_name == 'stanford_cars':
@@ -71,6 +73,10 @@ def get_input_shape(dataset_name: str) -> Tuple[int, int, int]:
         input_height = 64
         input_width = 64
         input_channel = 3
+    elif dataset_name in ('flower102', 'flowers102'):
+        input_height = 224
+        input_width = 224
+        input_channel = 3
     elif dataset_name == 'imagenet':
         input_height = 224
         input_width = 224
@@ -99,6 +105,13 @@ def get_dataset_normalization(dataset_name):
         dataset_normalization = (transforms.Normalize([0.5], [0.5]))
     elif dataset_name == 'tiny':
         dataset_normalization = (transforms.Normalize([0.4802, 0.4481, 0.3975], [0.2302, 0.2265, 0.2262]))
+    elif dataset_name in ('flower102', 'flowers102'):
+        dataset_normalization = (
+            transforms.Normalize(
+                mean=[0.485, 0.456, 0.406],
+                std=[0.229, 0.224, 0.225],
+            )
+        )
     elif dataset_name == "gtsrb" or dataset_name == "celeba":
         dataset_normalization = transforms.Normalize([0, 0, 0], [1, 1, 1])
     elif dataset_name == 'imagenet':
@@ -324,6 +337,23 @@ def dataset_and_transform_generate(args):
                                                           split='val',
                                                           download=True,
                                                           )
+        elif args.dataset in ("flower102", "flowers102"):
+            from torchvision.datasets import Flowers102
+            flowers_target_transform = transforms.Lambda(lambda label: label - 1)
+            train_dataset_without_transform = Flowers102(
+                args.dataset_path,
+                split='train',
+                transform=None,
+                target_transform=flowers_target_transform,
+                download=True,
+            )
+            test_dataset_without_transform = Flowers102(
+                args.dataset_path,
+                split='test',
+                transform=None,
+                target_transform=flowers_target_transform,
+                download=True,
+            )
             
         elif args.dataset == "stanford_cars":
             from torchvision.datasets import StanfordCars

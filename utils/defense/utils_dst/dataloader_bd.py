@@ -73,8 +73,8 @@ def normalization(opt, inputs):
     elif opt.dataset == "gtsrb" or opt.dataset == "celeba":
         # pass
         return output
-    elif opt.dataset == 'imagenet':
-        f = transforms.Normalize([0.4802, 0.4481, 0.3975], [0.2302, 0.2265, 0.2262])
+    elif opt.dataset in ('imagenet', 'flower102', 'flowers102'):
+        f = transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
     elif opt.dataset == "cifar100":
         f = transforms.Normalize([0.5070751592371323, 0.48654887331495095, 0.4409178433670343], [0.2673342858792401, 0.2564384629170883, 0.27615047132568404])
     else:
@@ -105,7 +105,7 @@ def get_transform_st(opt, train=True):
             transforms_list.append(transforms.RandomCrop((opt.input_height, opt.input_width), padding=4))
             transforms_list.append(transforms.RandomHorizontalFlip())
             transforms_list.append(transforms.RandomRotation(15))
-        elif opt.dataset == "imagenet":
+        elif opt.dataset in ("imagenet", "flower102", "flowers102"):
             transforms_list.append(transforms.RandomRotation(20))
             transforms_list.append(transforms.RandomHorizontalFlip(0.5))
         elif opt.dataset == "tiny":
@@ -237,9 +237,9 @@ def get_st_train_loader(opt, module='sscl'):
     elif opt.dataset == 'tiny':
         mean = (0.4802, 0.4481, 0.3975)
         std = (0.2302, 0.2265, 0.2262)
-    elif opt.dataset == 'imagenet':
-        mean = (0.4802, 0.4481, 0.3975)
-        std = (0.2302, 0.2265, 0.2262)
+    elif opt.dataset in ('imagenet', 'flower102', 'flowers102'):
+        mean = (0.485, 0.456, 0.406)
+        std = (0.229, 0.224, 0.225)
     elif opt.dataset == 'gtsrb':
         mean = None
     elif opt.dataset == 'path':

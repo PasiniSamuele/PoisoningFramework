@@ -23,6 +23,7 @@ basic sturcture for defense method:
 '''
 
 import argparse
+import json
 import os,sys
 import numpy as np
 import torch
@@ -42,9 +43,10 @@ from utils.trainer_cls import PureCleanModelTrainer
 from utils.aggregate_block.fix_random import fix_random
 from utils.aggregate_block.model_trainer_generate import generate_cls_model
 from utils.log_assist import get_git_info
-from utils.aggregate_block.dataset_and_transform_generate import get_input_shape, get_num_classes, get_transform
-from utils.save_load_attack import load_attack_result, save_defense_result
+from utils.aggregate_block.dataset_and_transform_generate import dataset_and_transform_generate, get_input_shape, get_num_classes, get_transform
+from utils.save_load_attack import load_attack_result
 from utils.nCHW_nHWC import *
+from torchvision.datasets import ImageFolder
 
 import tqdm
 import heapq
@@ -56,7 +58,6 @@ import copy
 from torch.utils.data import DataLoader
 from sklearn.metrics import confusion_matrix
 import random
-import csv
 from sklearn import metrics
 
 class STRIP():
@@ -91,8 +92,8 @@ class STRIP():
 
         clean_entropy, _ = clean_entropy.sort()
         print(len(clean_entropy))
-        threshold_low = float(clean_entropy[int(self.defense_fpr * len(clean_entropy))])
-        threshold_high = np.inf
+        self.threshold_low = float(clean_entropy[int(self.defense_fpr * len(clean_entropy))])
+        self.threshold_high = np.inf
 
         # now cleanse the inspection set with the chosen boundary
         inspection_set_loader = DataLoader(self.inspection_set, batch_size=128, shuffle=False)
@@ -105,7 +106,7 @@ class STRIP():
                 all_entropy.append(e)
         all_entropy = torch.FloatTensor(all_entropy)
 
-        suspicious_indices = torch.logical_or(all_entropy < threshold_low, all_entropy > threshold_high).nonzero().reshape(-1)
+        suspicious_indices = torch.logical_or(all_entropy < self.threshold_low, all_entropy > self.threshold_high).nonzero().reshape(-1)
         return suspicious_indices.numpy()
 
     def check(self, _input: torch.Tensor, _label: torch.Tensor, source_set) -> torch.Tensor:
@@ -119,7 +120,7 @@ class STRIP():
 
             for i in samples:
                 X, Y = source_set[i]
-                X = X.to(args.device)
+                X = X.to(self.args.device)
                 _test = self.superimpose(_input, X)
                 entropy = self.entropy(_test).cpu().detach()
                 _list.append(entropy)
@@ -184,10 +185,19 @@ class strip(defense):
         args.input_height, args.input_width, args.input_channel = get_input_shape(args.dataset)
         args.img_size = (args.input_height, args.input_width, args.input_channel)
         args.dataset_path = f"{args.dataset_path}/{args.dataset}"
+        if getattr(args, 'clean_sample_num', None) is None:
+            args.clean_sample_num = args.num_classes * 10
         
         self.args = args
 
-        if 'result_file' in args.__dict__ :
+        if getattr(args, 'checkpoint_path', None) is not None or getattr(args, 'poisoned_data_path', None) is not None:
+            self.set_paths(
+                checkpoint_path=getattr(args, 'checkpoint_path', None),
+                poisoned_data_path=getattr(args, 'poisoned_data_path', None),
+                save_root=getattr(args, 'save_root', None),
+                attack_name=getattr(args, 'attack_name', None),
+            )
+        elif 'result_file' in args.__dict__:
             if args.result_file is not None:
                 self.set_result(args.result_file)
 
@@ -226,6 +236,104 @@ class strip(defense):
         parser.add_argument('--clean_sample_num', type=int)
         parser.add_argument('--csv_save_path', type=str)
         parser.add_argument('--target_label', type=int)
+        parser.add_argument('--checkpoint_path', type=str, help='path to the model checkpoint or attack_result.pt')
+        parser.add_argument('--poisoned_data_path', type=str, help='path to the poisoned dataset bundle or attack_result.pt')
+        parser.add_argument('--save_root', type=str, help='root directory where detection results are saved')
+        parser.add_argument('--attack_name', type=str, help='attack folder name used under save_root/dataset/')
+
+    def _resolve_bundle_path(self, bundle_path: str) -> str:
+        if os.path.isdir(bundle_path):
+            for candidate_name in ('attack_result.pt', 'poisoned_dataset.pt', 'dataset.pt', 'result.pt'):
+                candidate_path = os.path.join(bundle_path, candidate_name)
+                if os.path.isfile(candidate_path):
+                    return candidate_path
+
+            pt_files = [name for name in os.listdir(bundle_path) if name.endswith('.pt')]
+            if len(pt_files) == 1:
+                return os.path.join(bundle_path, pt_files[0])
+
+            raise FileNotFoundError(f'Could not find a unique .pt file in {bundle_path}')
+
+        return bundle_path
+
+    def _load_state_dict(self, checkpoint_path: str):
+        checkpoint_path = self._resolve_bundle_path(checkpoint_path)
+        checkpoint = torch.load(checkpoint_path, map_location='cpu')
+
+        if isinstance(checkpoint, dict) and 'model' in checkpoint and isinstance(checkpoint['model'], dict):
+            return checkpoint['model']
+
+        if isinstance(checkpoint, dict):
+            return checkpoint
+
+        raise TypeError(f'Unsupported checkpoint format at {checkpoint_path}')
+
+    def _infer_attack_name(self, source_path: str) -> str:
+        normalized_path = os.path.normpath(source_path)
+        if normalized_path.endswith('.pt'):
+            return os.path.basename(os.path.dirname(normalized_path))
+        return os.path.basename(normalized_path)
+
+    def set_paths(self, checkpoint_path, poisoned_data_path, save_root, attack_name=None):
+        if poisoned_data_path is None:
+            raise ValueError('poisoned_data_path is required when using path-based mode')
+
+        test_tran = get_transform(self.args.dataset, *([self.args.input_height, self.args.input_width]), train=False)
+
+        if os.path.isdir(poisoned_data_path):
+            bd_test_dataset = ImageFolder(poisoned_data_path)
+            bd_test = dataset_wrapper_with_transform(bd_test_dataset, None, None)
+        else:
+            poisoned_bundle_path = self._resolve_bundle_path(poisoned_data_path)
+            poisoned_bundle = torch.load(poisoned_bundle_path, map_location='cpu')
+            bd_test = poisoned_bundle['bd_test']
+
+        if checkpoint_path is not None:
+            model_state = self._load_state_dict(checkpoint_path)
+        else:
+            if os.path.isdir(poisoned_data_path):
+                raise ValueError('checkpoint_path is required when poisoned_data_path is a directory')
+            model_state = poisoned_bundle['model']
+
+        if save_root is None:
+            raise ValueError('save_root is required when using path-based mode')
+
+        attack_name = attack_name or self._infer_attack_name(poisoned_data_path)
+        self.args.attack_name = attack_name
+        self.args.checkpoint_path = checkpoint_path
+        self.args.poisoned_data_path = poisoned_data_path
+        self.args.save_root = save_root
+        save_path = os.path.join(save_root, self.args.dataset, attack_name, 'strip_infer')
+        os.makedirs(save_path, exist_ok=True)
+
+        self.args.save_path = save_path
+        if self.args.checkpoint_save is None:
+            self.args.checkpoint_save = os.path.join(save_path, 'detection_info')
+            os.makedirs(self.args.checkpoint_save, exist_ok=True)
+
+        if self.args.log is None:
+            self.args.log = os.path.join(save_path, 'log')
+            os.makedirs(self.args.log, exist_ok=True)
+
+        if os.path.isdir(poisoned_data_path):
+            clean_setting = type('Args', (), {})()
+            clean_setting.dataset = self.args.dataset
+            clean_setting.dataset_path = self.args.dataset_path
+            clean_setting.img_size = self.args.img_size
+            train_dataset_without_transform, train_img_transform, train_label_transform, test_dataset_without_transform, test_img_transform, test_label_transform = dataset_and_transform_generate(clean_setting)
+            clean_test_dataset = dataset_wrapper_with_transform(
+                test_dataset_without_transform,
+                test_img_transform,
+                test_label_transform,
+            )
+            self.result = {
+                'model': model_state,
+                'bd_test': bd_test,
+                'clean_test': clean_test_dataset,
+            }
+        else:
+            poisoned_bundle['model'] = model_state
+            self.result = poisoned_bundle
 
     def set_result(self, result_file):
         attack_file = 'record/' + result_file
@@ -326,7 +434,10 @@ class strip(defense):
         
         test_tran = get_transform(self.args.dataset, *([self.args.input_height,self.args.input_width]) , train = False)
         bd_test_dataset = self.result['bd_test'].wrapped_dataset
-        pindex = np.where(np.array(bd_test_dataset.poison_indicator) == 1)[0]
+        if hasattr(bd_test_dataset, 'poison_indicator'):
+            pindex = np.where(np.array(bd_test_dataset.poison_indicator) == 1)[0]
+        else:
+            pindex = np.arange(len(bd_test_dataset))
 
         clean_test_dataset = self.result['clean_test'].wrapped_dataset
 
@@ -358,7 +469,8 @@ class strip(defense):
             labels_poison.append(label)
 
         ### d. combine poisoned samples with clean samples
-        random_clean_index = np.random.choice(np.arange(len(images)), 1000, replace=False)
+        num_detect_clean = min(len(images_poison), len(images))
+        random_clean_index = np.random.choice(np.arange(len(images)), num_detect_clean, replace=False)
         images_clean = [images[i] for i in random_clean_index]
         labels_clean = [labels[i] for i in random_clean_index]
         detected_samples = images_poison + images_clean
@@ -378,11 +490,35 @@ class strip(defense):
             fp = np.sum(true_index)
             fn = 0
             tp = 0
-            f = open(self.args.save_path + '/detection_info.csv', 'a', encoding='utf-8')
-            csv_write = csv.writer(f)
-            csv_write.writerow(['record', 'TN','FP','FN','TP','TPR','FPR', 'target'])
-            csv_write.writerow([args.result_file, tn,fp,fn,tp, 0,0, 'None'])
-            f.close()
+            TPR = 0
+            FPR = 0
+            precision = 0
+            acc = (tp + tn) / (tn + fp + fn + tp) if (tn + fp + fn + tp) != 0 else 0
+            summary = {
+                'dataset': self.args.dataset,
+                'attack_name': getattr(self.args, 'attack_name', None) or getattr(self.args, 'result_file', None) or 'unknown',
+                'record': getattr(self.args, 'result_file', None),
+                'checkpoint_path': getattr(self.args, 'checkpoint_path', None),
+                'poisoned_data_path': getattr(self.args, 'poisoned_data_path', None),
+                'TN': int(tn),
+                'FP': int(fp),
+                'FN': int(fn),
+                'TP': int(tp),
+                'TPR': float(TPR),
+                'FPR': float(FPR),
+                'precision': float(precision),
+                'acc': float(acc),
+                'threshold_low': float(getattr(worker, 'threshold_low', float('nan'))),
+                'threshold_high': None if np.isinf(getattr(worker, 'threshold_high', np.inf)) else float(getattr(worker, 'threshold_high', np.inf)),
+                'clean_sample_num': int(self.args.clean_sample_num),
+                'strip_alpha': float(worker.strip_alpha),
+                'N': int(worker.N),
+                'defense_fpr': float(worker.defense_fpr),
+                'suspected_count': int(len(suspect_index)),
+                'poisoned_count': int(len(images_poison)),
+                'clean_detect_count': int(len(images_clean)),
+                'elapsed_seconds': float(time.perf_counter() - start),
+            }
         else:    
             findex = np.zeros(len(detected_samples))
             for i in range(len(findex)):
@@ -400,16 +536,50 @@ class strip(defense):
             fw1 = 2*(precision * recall)/ (precision + recall) if precision + recall != 0 else 0
             end = time.perf_counter()
             time_miniute = (end-start)/60
+            summary = {
+                'dataset': self.args.dataset,
+                'attack_name': getattr(self.args, 'attack_name', None) or getattr(self.args, 'result_file', None) or 'unknown',
+                'record': getattr(self.args, 'result_file', None),
+                'checkpoint_path': getattr(self.args, 'checkpoint_path', None),
+                'poisoned_data_path': getattr(self.args, 'poisoned_data_path', None),
+                'TN': int(tn),
+                'FP': int(fp),
+                'FN': int(fn),
+                'TP': int(tp),
+                'TPR': float(TPR),
+                'FPR': float(FPR),
+                'precision': float(precision),
+                'acc': float(acc),
+                'recall': float(recall),
+                'f1': float(fw1),
+                'threshold_low': float(getattr(worker, 'threshold_low', float('nan'))),
+                'threshold_high': None if np.isinf(getattr(worker, 'threshold_high', np.inf)) else float(getattr(worker, 'threshold_high', np.inf)),
+                'clean_sample_num': int(self.args.clean_sample_num),
+                'strip_alpha': float(worker.strip_alpha),
+                'N': int(worker.N),
+                'defense_fpr': float(worker.defense_fpr),
+                'suspected_count': int(len(suspect_index)),
+                'poisoned_count': int(len(images_poison)),
+                'clean_detect_count': int(len(images_clean)),
+                'elapsed_seconds': float(end - start),
+                'elapsed_minutes': float(time_miniute),
+            }
 
-            f = open(self.args.save_path + '/detection_info.csv', 'a', encoding='utf-8')
-            csv_write = csv.writer(f)
-            csv_write.writerow(['record', 'TN','FP','FN','TP','TPR','FPR', 'target'])
-            csv_write.writerow([args.result_file, tn, fp, fn, tp, TPR, FPR, 'None'])
-            f.close()
+        summary_path = os.path.join(self.args.save_path, 'detection_result.json')
+        with open(summary_path, 'w', encoding='utf-8') as f:
+            json.dump(summary, f, indent=2)
+
+        return summary
 
                 
     def detection(self,result_file):
         self.set_result(result_file)
+        self.set_logger()
+        result = self.filtering()
+        return result
+
+    def detection_from_paths(self, checkpoint_path, poisoned_data_path, save_root, attack_name=None):
+        self.set_paths(checkpoint_path, poisoned_data_path, save_root, attack_name=attack_name)
         self.set_logger()
         result = self.filtering()
         return result
@@ -420,8 +590,16 @@ if __name__ == '__main__':
     strip.add_arguments(parser)
     args = parser.parse_args()
     strip_method = strip(args)
-    if "result_file" not in args.__dict__:
-        args.result_file = 'defense_test_badnet'
-    elif args.result_file is None:
-        args.result_file = 'defense_test_badnet'
-    result = strip_method.detection(args.result_file)
+    if args.checkpoint_path is not None or args.poisoned_data_path is not None or args.save_root is not None:
+        result = strip_method.detection_from_paths(
+            args.checkpoint_path,
+            args.poisoned_data_path,
+            args.save_root,
+            attack_name=args.attack_name,
+        )
+    else:
+        if "result_file" not in args.__dict__:
+            args.result_file = 'defense_test_badnet'
+        elif args.result_file is None:
+            args.result_file = 'defense_test_badnet'
+        result = strip_method.detection(args.result_file)

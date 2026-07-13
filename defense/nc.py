@@ -61,6 +61,8 @@ import numpy as np
 import torch
 import torch.nn as nn
 import cv2
+import json
+from sklearn.model_selection import train_test_split
 
 sys.path.append('../')
 sys.path.append(os.getcwd())
@@ -112,6 +114,67 @@ class Denormalize:
             x_clone[:, channel] = x[:, channel] * self.variance[channel] + self.expected_values[channel]
         return x_clone
 
+
+def get_stratified_sample_indices(dataset, ratio=0.1, random_state=None):
+    """
+    Get stratified sample indices from a dataset.
+    
+    Args:
+        dataset: Dataset with labels accessible
+        ratio: Fraction of data to sample (default: 0.1 for 10%)
+        random_state: Random seed for reproducibility
+        
+    Returns:
+        indices: Array of sampled indices
+    """
+    # Extract labels from the dataset
+    if hasattr(dataset, 'labels'):
+        labels = dataset.labels
+    elif hasattr(dataset, 'targets'):
+        labels = dataset.targets
+    elif hasattr(dataset, 'wrapped_dataset'):
+        # For wrapped datasets, try to get labels from the wrapped dataset
+        wrapped = dataset.wrapped_dataset
+        if hasattr(wrapped, 'targets'):
+            labels = wrapped.targets
+        elif hasattr(wrapped, 'labels'):
+            labels = wrapped.labels
+        else:
+            # Fallback: iterate through dataset to get labels
+            labels = []
+            for i in range(len(dataset)):
+                _, label, *_ = dataset[i]
+                labels.append(label)
+            labels = np.array(labels)
+    else:
+        # Fallback: iterate through dataset to get labels
+        labels = []
+        for i in range(len(dataset)):
+            _, label, *_ = dataset[i]
+            labels.append(label)
+        labels = np.array(labels)
+    
+    # Convert to numpy if tensor
+    if isinstance(labels, torch.Tensor):
+        labels = labels.numpy()
+    
+    # Create indices
+    indices = np.arange(len(labels))
+    
+    # Perform stratified sampling
+    if ratio >= 1.0:
+        return indices
+    
+    _, sampled_indices = train_test_split(
+        indices, 
+        test_size=ratio,  # We want to keep 'ratio' of data
+        stratify=labels,
+        random_state=random_state
+    )
+    
+    return np.sort(sampled_indices)
+
+
 class RegressionModel(nn.Module):
     def __init__(self, opt, init_mask, init_pattern,result):
         self._EPSILON = opt.EPSILON
@@ -143,7 +206,7 @@ class RegressionModel(nn.Module):
     def _get_classifier(self, opt):
        
         classifier = generate_cls_model(args.model,args.num_classes)
-        classifier.load_state_dict(self.result['model'])
+        classifier.load_state_dict(self.result['model'] if 'model' in self.result else self.result)
         classifier.to(args.device)
         
         for param in classifier.parameters():
@@ -160,6 +223,8 @@ class RegressionModel(nn.Module):
             denormalizer = None
         elif opt.dataset == 'tiny':
             denormalizer = Denormalize(opt, [0.4802, 0.4481, 0.3975], [0.2302, 0.2265, 0.2262])
+        elif opt.dataset == 'svhn':
+            denormalizer = Denormalize(opt, [0.4377, 0.4438, 0.4728], [0.1980, 0.2010, 0.1970])
         else:
             raise Exception("Invalid dataset")
         return denormalizer
@@ -173,6 +238,8 @@ class RegressionModel(nn.Module):
             normalizer = None
         elif opt.dataset == 'tiny':
             normalizer = Normalize(opt, [0.4802, 0.4481, 0.3975], [0.2302, 0.2265, 0.2262])
+        elif opt.dataset == 'svhn':
+            normalizer = Normalize(opt, [0.4377, 0.4438, 0.4728], [0.1980, 0.2010, 0.1970])
         else:
             raise Exception("Invalid dataset")
         return normalizer
@@ -389,7 +456,8 @@ def outlier_detection(l1_norm_list, idx_mapping, opt):
     print("Median: {}, MAD: {}".format(median, mad))
     print("Anomaly index: {}".format(min_mad))
 
-    if min_mad < 2:
+    is_backdoor = min_mad >= 2
+    if not is_backdoor:
         print("Not a backdoor model")
     else:
         print("This is a backdoor model")
@@ -421,24 +489,22 @@ def outlier_detection(l1_norm_list, idx_mapping, opt):
         "Flagged label list: {}".format(",".join(["{}: {}".format(y_label, l_norm) for y_label, l_norm in flag_list]))
     )
 
-    return flag_list
+    return is_backdoor, flag_list
         
 
 class nc(defense):
-    r"""Neural Cleanse: Identifying And Mitigating Backdoor Attacks In Neural Networks
+    r"""Neural Cleanse: Identifying Backdoor Attacks In Neural Networks (Detection Only)
     
     basic structure: 
     
     1. config args, save_path, fix random seed
-    2. load the backdoor attack data and backdoor test data
-    3. load the backdoor model
-    4. nc defense:
+    2. load the clean training data (no access to poisoned data)
+    3. load the model to be analyzed
+    4. nc detection:
         a. initialize the model and trigger
         b. train triggers according to different target labels
-        c. Determine whether the trained reverse trigger is a real backdoor trigger
-            If it is a real backdoor trigger:
-            d. select samples as clean samples and unlearning samples, finetune the origin model
-    5. test the result and get ASR, ACC, RC 
+        c. Determine whether the trained reverse trigger indicates a backdoor
+        d. Save detection results to JSON file and stop
        
     .. code-block:: python
     
@@ -466,9 +532,11 @@ class nc(defense):
         baisc args: in the base class
         ratio (float): the ratio of training data
         index (str): the index of clean data
-        cleaning_ratio (float): the ratio of cleaning data used for finetuning the backdoor model
-        unlearning_ratio (float): the ratio of unlearning data (the clean data + the learned trigger) used for finetuning the backdoor model
         nc_epoch (int): the epoch for neural cleanse to train the trigger
+        
+    Note:
+        This version focuses on detection only. No mitigation/finetuning is performed.
+        Results are saved to detection_result.json in the save_path directory.
     """ 
 
 
@@ -506,7 +574,9 @@ class nc(defense):
         parser.add_argument("--dataset_path", type=str, help='the location of data')
         parser.add_argument('--dataset', type=str, help='mnist, cifar10, cifar100, gtrsb, tiny') 
         parser.add_argument('--result_file', type=str, help='the location of result')
-    
+        parser.add_argument('--result_file_clean', type=str, default="", help='the location of result')
+        parser.add_argument('--use_clean_file', type=bool,default=False, help='the location of result')
+
         parser.add_argument('--epochs', type=int)
         parser.add_argument('--batch_size', type=int)
         parser.add_argument("--num_workers", type=float)
@@ -527,18 +597,20 @@ class nc(defense):
         parser.add_argument('--yaml_path', type=str, default="./config/defense/nc/config.yaml", help='the path of yaml')
 
         #set the parameter for the nc defense
-        parser.add_argument('--ratio', type=float,  help='ratio of training data')
+        parser.add_argument('--ratio', type=float,  help='ratio of training data (uses stratified sampling to maintain class balance)')
         parser.add_argument('--index', type=str, help='index of clean data')
-        parser.add_argument('--cleaning_ratio', type=float,  help='ratio of cleaning data')
-        parser.add_argument('--unlearning_ratio', type=float, help='ratio of unlearning data')
+        # Mitigation parameters removed - detection only
+        # parser.add_argument('--cleaning_ratio', type=float,  help='ratio of cleaning data')
+        # parser.add_argument('--unlearning_ratio', type=float, help='ratio of unlearning data')
         parser.add_argument('--nc_epoch', type=int,  help='the epoch for neural cleanse')
 
         
 
     def set_result(self, result_file):
         attack_file = 'record/' + result_file
+        clean_file = 'record/' + self.args.result_file_clean 
         self.attack_file = attack_file
-        save_path = 'record/' + result_file + '/defense/nc/'
+        save_path = 'record/' + self.args.result_file_clean + '/defense/nc/'  if self.args.use_clean_file else 'record/' + result_file + '/defense/nc/'
         if not (os.path.exists(save_path)):
             os.makedirs(save_path)
         # assert(os.path.exists(save_path))    
@@ -550,7 +622,9 @@ class nc(defense):
         if self.args.log is None:
             self.args.log = save_path + 'log/'
             if not (os.path.exists(self.args.log)):
-                os.makedirs(self.args.log)  
+                os.makedirs(self.args.log)
+        if self.args.use_clean_file:
+            self.result_clean = load_attack_result(clean_file + '/clean_model.pt')
         self.result = load_attack_result(attack_file + '/attack_result.pt')
 
     def set_trainer(self, model):
@@ -596,9 +670,13 @@ class nc(defense):
         args = self.args
         result = self.result
 
-        # Prepare model, optimizer, scheduler
+        # Prepare model
         model = generate_cls_model(self.args.model,self.args.num_classes)
-        model.load_state_dict(self.result['model'])
+        if self.args.use_clean_file:
+            print("Using clean model for NC defense.")
+            model.load_state_dict(self.result_clean['model'] if 'model' in self.result_clean else self.result_clean)
+        else:
+            model.load_state_dict(self.result['model'] if 'model' in self.result else self.result)
         if "," in self.device:
             model = torch.nn.DataParallel(
                 model,
@@ -608,17 +686,22 @@ class nc(defense):
             model.to(self.args.device)
         else:
             model.to(self.args.device)
-        optimizer, scheduler = argparser_opt_scheduler(model, self.args)
-        # criterion = nn.CrossEntropyLoss()
-        self.set_trainer(model)
-        criterion = argparser_criterion(args)
-
-        
-
+  
+        # Prepare clean training data (no poisoned data access)
         train_tran = get_transform(self.args.dataset, *([self.args.input_height,self.args.input_width]) , train = True)
         clean_dataset = prepro_cls_DatasetBD_v2(self.result['clean_train'].wrapped_dataset)
         data_all_length = len(clean_dataset)
-        ran_idx = choose_index(self.args, data_all_length) 
+        
+        # Use stratified sampling to maintain class balance while reducing dataset size
+        logging.info(f'Original dataset size: {data_all_length}')
+        logging.info(f'Applying stratified sampling with ratio: {self.args.ratio}')
+        ran_idx = get_stratified_sample_indices(
+            clean_dataset, 
+            ratio=self.args.ratio, 
+            random_state=self.args.random_seed
+        )
+        logging.info(f'Sampled dataset size: {len(ran_idx)} ({len(ran_idx)/data_all_length*100:.1f}%)')
+        
         log_index = self.args.log + 'index.txt'
         np.savetxt(log_index, ran_idx, fmt='%d')
         clean_dataset.subset(ran_idx)
@@ -641,7 +724,9 @@ class nc(defense):
         init_mask = np.ones((1, args.input_height, args.input_width)).astype(np.float32)
         init_pattern = np.ones((args.input_channel, args.input_height, args.input_width)).astype(np.float32)
 
-        flag = 0
+        is_backdoor_detected = False
+        all_flag_lists = []
+        
         for test in range(args.n_times_test):
             # b. train triggers according to different target labels
             print("Test {}:".format(test))
@@ -658,7 +743,8 @@ class nc(defense):
                 print("----------------- Analyzing label: {} -----------------".format(target_label))
                 logging.info("----------------- Analyzing label: {} -----------------".format(target_label))
                 args.target_label = target_label
-                recorder, args = train_mask(args, result, trainloader, init_mask, init_pattern)
+                result_to_use = result if not args.use_clean_file else self.result_clean
+                recorder, args = train_mask(args, result_to_use, trainloader, init_mask, init_pattern)
 
                 mask = recorder.mask_best
                 masks.append(mask)
@@ -670,187 +756,31 @@ class nc(defense):
             l1_norm_list = torch.stack([torch.norm(m, p=args.use_norm) for m in masks])
             logging.info("{} labels found".format(len(l1_norm_list)))
             logging.info("Norm values: {}".format(l1_norm_list))
-            flag_list = outlier_detection(l1_norm_list, idx_mapping, args)
-            if len(flag_list) != 0:
-                flag = 1
-
-        if flag == 0:
-            logging.info('This is not a backdoor model')
-            test_tran = get_transform(self.args.dataset, *([self.args.input_height,self.args.input_width]) , train = False)
-            data_bd_testset = self.result['bd_test']
-            data_bd_testset.wrap_img_transform = test_tran
-            data_bd_loader = torch.utils.data.DataLoader(data_bd_testset, batch_size=self.args.batch_size, num_workers=self.args.num_workers,drop_last=False, shuffle=True,pin_memory=args.pin_memory)
-
-            data_clean_testset = self.result['clean_test']
-            data_clean_testset.wrap_img_transform = test_tran
-            data_clean_loader = torch.utils.data.DataLoader(data_clean_testset, batch_size=self.args.batch_size, num_workers=self.args.num_workers,drop_last=False, shuffle=True,pin_memory=args.pin_memory)
+            is_backdoor, flag_list = outlier_detection(l1_norm_list, idx_mapping, args)
             
-            agg = Metric_Aggregator()
+            if is_backdoor:
+                is_backdoor_detected = True
+            all_flag_lists.append([(int(label), float(l_norm)) for label, l_norm in flag_list])
 
-            test_dataloader_dict = {}
-            test_dataloader_dict["clean_test_dataloader"] = data_clean_loader
-            test_dataloader_dict["bd_test_dataloader"] = data_bd_loader
-            
-            model = generate_cls_model(args.model,args.num_classes)
-            model.load_state_dict(result['model'])
-            self.set_trainer(model)
-
-            self.trainer.set_with_dataloader(
-                train_dataloader = trainloader,
-                test_dataloader_dict = test_dataloader_dict,
-
-                criterion = criterion,
-                optimizer = None,
-                scheduler = None,
-                device = self.args.device,
-                amp = self.args.amp,
-
-                frequency_save = self.args.frequency_save,
-                save_folder_path = self.args.save_path,
-                save_prefix = 'nc',
-
-                prefetch = self.args.prefetch,
-                prefetch_transform_attr_name = "ori_image_transform_in_loading",
-                non_blocking = self.args.non_blocking,
-
-                # continue_training_path = continue_training_path,
-                # only_load_model = only_load_model,
-            )
-            clean_test_loss_avg_over_batch, \
-                    bd_test_loss_avg_over_batch, \
-                    test_acc, \
-                    test_asr, \
-                    test_ra = self.trainer.test_current_model(
-                test_dataloader_dict, self.args.device,
-            )
-            agg({
-                    "clean_test_loss_avg_over_batch": clean_test_loss_avg_over_batch,
-                    "bd_test_loss_avg_over_batch": bd_test_loss_avg_over_batch,
-                    "test_acc": test_acc,
-                    "test_asr": test_asr,
-                    "test_ra": test_ra,
-                })
-            agg.to_dataframe().to_csv(f"{args.save_path}nc_df_summary.csv")
-
-            result = {}
-            result['model'] = model
-            save_defense_result(
-                model_name=args.model,
-                num_classes=args.num_classes,
-                model=model.cpu().state_dict(),
-                save_path=args.save_path,
-            )
-            return result  
-
-
-        self.set_result(args.result_file)
-        test_tran = get_transform(self.args.dataset, *([self.args.input_height,self.args.input_width]) , train = False)
-        data_bd_testset = self.result['bd_test']
-        data_bd_testset.wrap_img_transform = test_tran
-        data_bd_loader = torch.utils.data.DataLoader(data_bd_testset, batch_size=self.args.batch_size, num_workers=self.args.num_workers,drop_last=False, shuffle=True,pin_memory=args.pin_memory)
-
-        data_clean_testset = self.result['clean_test']
-        data_clean_testset.wrap_img_transform = test_tran
-        data_clean_loader = torch.utils.data.DataLoader(data_clean_testset, batch_size=self.args.batch_size, num_workers=self.args.num_workers,drop_last=False, shuffle=True,pin_memory=args.pin_memory)
-
-
-
-
-        # d. select samples as clean samples and unlearning samples, finetune the origin model
-        model = generate_cls_model(args.model,args.num_classes)
-        model.load_state_dict(result['model'])
-        model.to(args.device)
-        train_tran = get_transform(args.dataset, *([args.input_height,args.input_width]) , train = True)
-        attack_file = self.attack_file
-        self.result = load_attack_result(attack_file + '/attack_result.pt')
-        clean_dataset = prepro_cls_DatasetBD_v2(self.result['clean_train'].wrapped_dataset)
-        data_all_length = len(clean_dataset)
-        ran_idx = choose_index(self.args, data_all_length) 
-        log_index = self.args.log + 'index.txt'
-        np.savetxt(log_index, ran_idx, fmt='%d')
-        clean_dataset.subset(ran_idx)
-        data_set_without_tran = clean_dataset
-        data_set_o = self.result['clean_train']
-        data_set_o.wrapped_dataset = data_set_without_tran
-        data_set_o.wrap_img_transform = train_tran
-    
-        data_loader = torch.utils.data.DataLoader(data_set_o, batch_size=self.args.batch_size, num_workers=self.args.num_workers, shuffle=True, pin_memory=args.pin_memory)
-        trainloader = data_loader
-
-        idx_clean = ran_idx[0:int(len(data_set_o)*(1-args.unlearning_ratio))]
-        idx_unlearn = ran_idx[int(len(data_set_o)*(1-args.unlearning_ratio)):int(len(data_set_o))]
-        x_new = list()
-        y_new = list()
-        original_index_array = list()
-        poison_indicator = list()
-        for ii in range(int(len(data_set_o)*(1-args.unlearning_ratio))):
-            x_new.extend([data_set_o.wrapped_dataset[ii][0]])
-            y_new.extend([data_set_o.wrapped_dataset[ii][1]])
-            original_index_array.extend([len(x_new)-1])
-            poison_indicator.extend([0])
-
-        for (label,_) in flag_list:
-            mask_path = os.getcwd() + '/' + f'{args.log}' + '{}/'.format(str(label)) + 'mask.png'
-            mask_image = mlt.imread(mask_path)
-            mask_image = cv2.resize(mask_image,(args.input_height, args.input_width))
-            trigger_path = os.getcwd() + '/' + f'{args.log}' + '{}/'.format(str(label)) + 'trigger.png'
-            signal_mask = mlt.imread(trigger_path)*255
-            signal_mask = cv2.resize(signal_mask,(args.input_height, args.input_width))
-            
-            x_unlearn = list()
-            x_unlearn_new = list()
-            y_unlearn_new = list()
-            original_index_array_new = list()
-            poison_indicator_new = list()
-            for ii in range(int(len(data_set_o)*(1-args.unlearning_ratio)),int(len(data_set_o))):
-                img = data_set_o.wrapped_dataset[ii][0]
-                x_unlearn.extend([img])
-                x_np = np.array(cv2.resize(np.array(img),(args.input_height, args.input_width))) * (1-np.array(mask_image)) + np.array(signal_mask)
-                x_np = np.clip(x_np.astype('uint8'), 0, 255)
-                x_np_img = Image.fromarray(x_np)
-                x_unlearn_new.extend([x_np_img])
-                y_unlearn_new.extend([data_set_o.wrapped_dataset[ii][1]])
-                original_index_array_new.extend([len(x_new)+len(x_unlearn_new)-1])
-                poison_indicator_new.extend([0])
-            x_new.extend(x_unlearn_new)
-            y_new.extend(y_unlearn_new)
-            original_index_array.extend(original_index_array_new)
-            poison_indicator.extend(poison_indicator_new)
-
-        ori_dataset = xy_iter(x_new,y_new,None)
-
-        data_set_o.wrapped_dataset.dataset = ori_dataset
-        data_set_o.wrapped_dataset.original_index_array = original_index_array
-        data_set_o.wrapped_dataset.poison_indicator = poison_indicator
-        trainloader = torch.utils.data.DataLoader(data_set_o, batch_size=args.batch_size, num_workers=args.num_workers,drop_last=False, shuffle=True,pin_memory=True)
-
-        self.trainer.train_with_test_each_epoch_on_mix(
-            trainloader,
-            data_clean_loader,
-            data_bd_loader,
-            args.epochs,
-            criterion=criterion,
-            optimizer=optimizer,
-            scheduler=scheduler,
-            device=self.args.device,
-            frequency_save=args.frequency_save,
-            save_folder_path=args.save_path,
-            save_prefix='nc',
-            amp=args.amp,
-            prefetch=args.prefetch,
-            prefetch_transform_attr_name="ori_image_transform_in_loading", # since we use the preprocess_bd_dataset
-            non_blocking=args.non_blocking,
-        )
+        # Save detection results to JSON
+        detection_result = {
+            "is_backdoor": is_backdoor_detected,
+            "dataset": args.dataset,
+            "model": args.model,
+            "n_times_test": args.n_times_test,
+            "flagged_labels_per_test": all_flag_lists,
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+        }
         
-        result = {}
-        result['model'] = model
-        save_defense_result(
-            model_name=args.model,
-            num_classes=args.num_classes,
-            model=model.cpu().state_dict(),
-            save_path=args.save_path,
-        )
-        return result
+        json_output_path = os.path.join(args.save_path, "detection_result.json")
+        with open(json_output_path, "w") as f:
+            json.dump(detection_result, f, indent=4)
+        
+        logging.info(f"Detection result saved to {json_output_path}")
+        logging.info(f"Is backdoor detected: {is_backdoor_detected}")
+        
+        # Return detection result (no model training/finetuning)
+        return detection_result
 
     def defense(self,result_file):
         self.set_result(result_file)

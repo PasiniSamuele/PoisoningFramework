@@ -63,7 +63,7 @@ class MultiStepAttack(NormalCase):
     def set_bd_args(cls, parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         parser.add_argument("--clean_pairs", type=int, default=1,
                            help="Number of clean training pairs before the attack step")
-        parser.add_argument("--skip_clean_base_steps", type=bool, default=True,
+        parser.add_argument("--skip_clean_base_steps", type=bool, default=False,
                            help="Whether to skip clean base steps before the attack step")
         parser.add_argument('--train_set_clean_percentage', type=float, default=0.8,
                            help="Percentage of the set to use to train the initial clean model")
@@ -260,20 +260,23 @@ class MultiStepAttack(NormalCase):
         
         # Store the split datasets (original clean and attack parts)
         self.train_clean_part = train_clean_part
-        self.train_attack_part = train_attack_part
         self.test_dataset = test_dataset_without_transform  # Unique test set
         
-        # Create two copies of the attack parts: one clean, one for poisoning
-        logging.info("Creating clean and poisoned copies of attack parts")
+        # Split the attack part into two equal stratified parts
+        logging.info("Splitting attack part into two equal stratified parts for clean and poisoned training")
+        train_attack_clean_part, train_attack_poisoned_part = self._split_dataset_by_percentage(
+            train_attack_part, 0.5, "attack_part"
+        )
         
-        # Clean copies of attack parts (ready to use)
-        self.train_attack_clean_copy = train_attack_part
+        # Store the two attack parts separately
+        self.train_attack_clean_copy = train_attack_clean_part
+        self.train_attack_poisoned_part = train_attack_poisoned_part
         # Test set remains the same for all steps
         self.test_attack_clean_copy = test_dataset_without_transform
         
         # Create properly poisoned copies of attack parts using the actual attack method
         logging.info("Creating poisoned attack dataset using attack transforms")
-        self._create_poisoned_attack_dataset(train_attack_part, test_dataset_without_transform)
+        self._create_poisoned_attack_dataset(self.train_attack_poisoned_part, test_dataset_without_transform)
         
         # Now split the clean parts into multiple pairs based on clean_pairs parameter
         clean_pairs = getattr(self.args, 'clean_pairs', 5)
@@ -641,13 +644,13 @@ class MultiStepAttack(NormalCase):
         """
         logging.info('Multi-step stage2 training start - New algorithm')
         
-        # Step 1: Train all clean pairs
-        if not self.args.skip_clean_base_steps:
-            self._train_clean_pairs()
+        # # Step 1: Train all clean pairs
+        # if not self.args.skip_clean_base_steps:
+        #     self._train_clean_pairs()
 
-        # Step 2: Train attack base model
-        if not self.args.skip_clean_base_steps:
-            self._train_attack_base()
+        # # Step 2: Train attack base model
+        # if not self.args.skip_clean_base_steps:
+        # self._train_attack_base()
 
         # Step 3: Train attack clean and poisoned models
         self._train_attack_variants()
@@ -789,7 +792,7 @@ class MultiStepAttack(NormalCase):
     def _train_attack_base(self):
         """
         Train the attack base model using the entire train_clean dataset.
-        This model serves as the foundation for both attack_clean and attack_poisoned variants.
+        This model serves as the foundation for attack_base_2.
         """
         logging.info('Starting attack base model training')
         
@@ -800,45 +803,87 @@ class MultiStepAttack(NormalCase):
         train_dataset = self.train_clean_part
         test_dataset = self.test_dataset
         
-        self._train_attack_step(
-            step_name='attack_base',
-            save_path=attack_base_path,
-            train_dataset=train_dataset,
-            test_dataset=test_dataset,
-            weights_path=None  # Train from scratch
-        )
+        # Step 1: Train attack_base from scratch
+        # self._train_attack_step(
+        #     step_name='attack_base',
+        #     save_path=attack_base_path,
+        #     train_dataset=train_dataset,
+        #     test_dataset=test_dataset,
+        #     weights_path=None  # Train from scratch
+        # )
         
         logging.info('Attack base model training completed')
+        
+        # Step 2: Train attack_base_2 by fine-tuning attack_base with additional data
+        logging.info('Starting attack_base_2 model training (fine-tuning attack_base)')
+        
+        attack_base_2_path = os.path.join(self.args.save_path, 'attack_base_2')
+        attack_base_model_path = os.path.abspath(os.path.join(attack_base_path, 'clean_model.pt'))
+        
+        # Verify the attack_base weights exist before proceeding
+        if not os.path.exists(attack_base_model_path):
+            raise FileNotFoundError(f'Attack base model not found at: {attack_base_model_path}. '
+                                   f'Make sure attack_base training completed successfully.')
+        
+        logging.info(f'Will load weights from: {attack_base_model_path}')
+        
+        # Combine train_clean_part + train_attack_clean_part for attack_base_2
+        from torch.utils.data import ConcatDataset
+        combined_dataset = ConcatDataset([self.train_clean_part, self.train_attack_clean_copy])
+        
+        self._train_attack_step(
+            step_name='attack_base_2',
+            save_path=attack_base_2_path,
+            train_dataset=combined_dataset,
+            test_dataset=test_dataset,
+            weights_path=attack_base_model_path  # Load from attack_base
+        )
+        
+        logging.info('Attack_base_2 model training completed')
 
     def _train_attack_variants(self):
         """
-        Train attack_clean and attack_poisoned variants by fine-tuning the attack_base model.
+        Train attack_clean and attack_poisoned variants by fine-tuning the attack_base_2 model.
         """
         logging.info('Starting attack variants training')
         
-        attack_base_model_path = os.path.join(self.args.save_path, 'attack_base', 'clean_model.pt')
-        if not self.args.skip_clean_base_steps:
+        attack_base_2_model_path = os.path.abspath(os.path.join(self.args.save_path, 'attack_base_2', 'clean_model.pt'))
+        
+        # Verify the attack_base_2 weights exist before proceeding
+        if not os.path.exists(attack_base_2_model_path):
+            raise FileNotFoundError(f'Attack base 2 model not found at: {attack_base_2_model_path}. '
+                                   f'Make sure attack_base_2 training completed successfully.')
+        
+        logging.info(f'Will load weights for attack variants from: {attack_base_2_model_path}')
+        
+        # if not self.args.skip_clean_base_steps:
 
-        # 1. Train attack_clean: train_clean + attack_part (clean)
-            self._train_attack_clean(attack_base_model_path)
+        # 1. Train attack_clean: train_clean + train_attack_clean_part + train_attack_poisoned_part (clean)
+        # self._train_attack_clean(attack_base_2_model_path)
   
-        # 2. Train attack_poisoned: train_clean + attack_part (poisoned)
-        self._train_attack_poisoned(attack_base_model_path)
+        # 2. Train attack_poisoned: train_clean + train_attack_clean_part + train_attack_poisoned_part (poisoned)
+        self._train_attack_poisoned(attack_base_2_model_path)
 
         logging.info('Attack variants training completed')
 
     def _train_attack_clean(self, base_model_path):
         """
-        Train attack_clean model: fine-tune attack_base using train_clean + attack_part (clean).
+        Train attack_clean model: fine-tune attack_base_2 using the full dataset (clean, no poisoning).
+        This uses train_clean_part + train_attack_clean_copy + train_attack_poisoned_part (as clean data).
         """
         logging.info('Training attack_clean model')
         
         # Create attack_clean directory
         attack_clean_path = os.path.join(self.args.save_path, 'attack_clean')
         
-        # Combine train_clean_part + attack_part (clean version)
+        # Combine all parts: train_clean_part + train_attack_clean_copy + train_attack_poisoned_part
+        # Note: train_attack_poisoned_part is used here as clean data (without poisoning)
         from torch.utils.data import ConcatDataset
-        combined_dataset = ConcatDataset([self.train_clean_part, self.train_attack_clean_copy])
+        combined_dataset = ConcatDataset([
+            self.train_clean_part, 
+            self.train_attack_clean_copy, 
+            self.train_attack_poisoned_part  # Use as clean data
+        ])
         
         self._train_attack_step(
             step_name='attack_clean',
@@ -852,16 +897,23 @@ class MultiStepAttack(NormalCase):
 
     def _train_attack_poisoned(self, base_model_path):
         """
-        Train attack_poisoned model: fine-tune attack_base using train_clean + attack_part (poisoned).
+        Train attack_poisoned model: fine-tune attack_base_2 using the full dataset with poisoning.
+        This uses train_clean_part + train_attack_clean_copy + train_attack_poisoned_copy (poisoned version).
+        The poisoned copy contains backdoored samples in train_attack_poisoned_part.
         """
         logging.info('Training attack_poisoned model')
         
         # Create attack_poisoned directory
         attack_poisoned_path = os.path.join(self.args.save_path, 'attack_poisoned')
         
-        # Combine train_clean_part + attack_part (poisoned version)
+        # Combine all parts: train_clean_part + train_attack_clean_copy + train_attack_poisoned_copy
+        # Note: train_attack_poisoned_copy contains the backdoored samples
         from torch.utils.data import ConcatDataset
-        combined_dataset = ConcatDataset([self.train_clean_part, self.train_attack_poisoned_copy])
+        combined_dataset = ConcatDataset([
+            self.train_clean_part, 
+            self.train_attack_clean_copy, 
+            self.train_attack_poisoned_copy  # Contains poisoned samples
+        ])
         
         self._train_attack_step(
             step_name='attack_poisoned',
@@ -906,6 +958,13 @@ class MultiStepAttack(NormalCase):
         relative_path = os.path.relpath(save_path, './record')
         step_args.save_folder_name = relative_path
         step_args.weights_path = weights_path
+        
+        # Log the weights path for debugging
+        if weights_path is not None:
+            logging.info(f'Setting weights_path to: {weights_path}')
+            logging.info(f'Weights file exists: {os.path.exists(weights_path)}')
+        else:
+            logging.info('No weights_path provided, training from scratch')
         
         # Create the directory manually
         os.makedirs(save_path, exist_ok=True)
@@ -1090,9 +1149,14 @@ Examples:
         logging.info(f"      Step 0: train_{i}/step_0/")
         logging.info(f"      Step 1: train_{i}/step_1/")
     logging.info(f"    Attack steps:")
-    logging.info(f"      Base: attack_base/")
-    logging.info(f"      Clean: attack_clean/")
-    logging.info(f"      Poisoned: attack_poisoned/")
+    logging.info(f"      Base: attack_base/ (trained from scratch on train_clean_part)")
+    logging.info(f"      Base 2: attack_base_2/ (fine-tuned from attack_base on train_clean_part + train_attack_clean_part)")
+    logging.info(f"      Clean: attack_clean/ (fine-tuned from attack_base_2 on full dataset WITHOUT poisoning)")
+    logging.info(f"      Poisoned: attack_poisoned/ (fine-tuned from attack_base_2 on full dataset WITH poisoning)")
+    logging.info(f"")
+    logging.info(f"    Note: Both attack_clean and attack_poisoned use the same data split:")
+    logging.info(f"          train_clean_part + train_attack_clean_part + train_attack_poisoned_part")
+    logging.info(f"          The difference is that attack_poisoned has backdoor triggers in train_attack_poisoned_part")
     
     # Execute the attack
     try:

@@ -37,6 +37,7 @@ import os,sys
 import numpy as np
 import torch
 import torch.nn as nn
+import json
 
 sys.path.append('../')
 sys.path.append(os.getcwd())
@@ -209,6 +210,128 @@ def save_mask_scores(state_dict, file_name):
         f.write('No \t Layer Name \t Neuron Idx \t Mask Score \n')
         f.writelines(mask_values)
 
+
+def detect_backdoor_from_masks(mask_values_list, args):
+    """
+    Detect if a model is backdoored based on the distribution of mask values.
+    
+    Args:
+        mask_values_list: List of mask values (floats)
+        args: Arguments containing detection parameters
+        
+    Returns:
+        is_backdoor: Boolean indicating if backdoor is detected
+        detection_stats: Dictionary with detection statistics
+    """
+    print("-" * 30)
+    print("Analyzing mask values for backdoor detection")
+    
+    mask_tensor = torch.tensor(mask_values_list)
+    
+    # Use MAD (Median Absolute Deviation) for outlier detection
+    consistency_constant = 1.4826
+    median = torch.median(mask_tensor)
+    mad = consistency_constant * torch.median(torch.abs(mask_tensor - median))
+    min_mad = torch.abs(torch.min(mask_tensor) - median) / mad
+    
+    # Statistics
+    mean_val = torch.mean(mask_tensor)
+    std_val = torch.std(mask_tensor)
+    min_val = torch.min(mask_tensor)
+    max_val = torch.max(mask_tensor)
+    
+    print(f"Mask Statistics:")
+    print(f"  Mean: {mean_val:.4f}, Std: {std_val:.4f}")
+    print(f"  Min: {min_val:.4f}, Max: {max_val:.4f}")
+    print(f"  Median: {median:.4f}, MAD: {mad:.4f}")
+    print(f"  Anomaly index (min_mad): {min_mad:.4f}")
+    
+    # Detection: two methods available - 'mad' (default) and 'percentile'
+    method = getattr(args, 'detection_method', 'mad')
+    mad_epsilon = getattr(args, 'mad_epsilon', 1e-6)
+    pct_cutoff = getattr(args, 'percentile_cutoff', 5.0)
+    low_mask_ratio_threshold = getattr(args, 'low_mask_ratio_threshold', 0.02)
+
+    # protective: use mad_safe to avoid division by near-zero MAD
+    mad_safe = mad if mad > mad_epsilon else mad_epsilon
+
+    # Count how many neurons have very low mask values (potential backdoor neurons)
+    low_threshold_mad = median - (getattr(args, 'mad_threshold', 2.0) * mad_safe)
+    num_low_masks = int(torch.sum(mask_tensor < low_threshold_mad).item())
+    total_neurons = len(mask_values_list)
+    low_mask_ratio = num_low_masks / float(total_neurons)
+
+    # MAD-based decision: require both an anomalous min AND a non-trivial fraction of very-low masks
+    min_mad = float(min_mad)
+    mad_threshold = getattr(args, 'mad_threshold', 2.0)
+    is_backdoor_mad = (min_mad >= mad_threshold) and (low_mask_ratio >= low_mask_ratio_threshold)
+
+    # Percentile-based decision: look at the fraction below percentile cutoff
+    cutoff_value = float(np.percentile(mask_values_list, pct_cutoff))
+    num_below_pct = int(np.sum(np.array(mask_values_list) <= cutoff_value))
+    pct_low_mask_ratio = num_below_pct / float(total_neurons)
+    is_backdoor_pct = pct_low_mask_ratio >= low_mask_ratio_threshold
+
+    # Choose final decision based on requested method, but include both metrics in stats
+    if method == 'percentile':
+        is_backdoor = is_backdoor_pct
+    else:
+        is_backdoor = is_backdoor_mad
+
+    print(f"Neurons with mask < {low_threshold_mad:.4f}: {num_low_masks}/{total_neurons} ({low_mask_ratio:.2%})")
+    print(f"Percentile({pct_cutoff}) cutoff: {cutoff_value:.4f}, below: {num_below_pct}/{total_neurons} ({pct_low_mask_ratio:.2%})")
+    if not is_backdoor:
+        print("Not a backdoor model (no anomalous cluster of low mask values by selected method)")
+    else:
+        print("This is a backdoor model (detected anomalous cluster of low mask values)")
+    
+    detection_stats = {
+        "median": float(median),
+        "mad": float(mad),
+        "mad_safe": float(mad_safe),
+        "min_mad": float(min_mad),
+        "mean": float(mean_val),
+        "std": float(std_val),
+        "min": float(min_val),
+        "max": float(max_val),
+        "threshold_used": mad_threshold,
+        "num_low_masks": num_low_masks,
+        "total_neurons": total_neurons,
+        "low_mask_ratio": float(low_mask_ratio),
+        "percentile_cutoff": float(pct_cutoff),
+        "num_below_percentile": num_below_pct,
+        "percentile_low_mask_ratio": float(pct_low_mask_ratio),
+        "detection_method": method
+    }
+    
+    return is_backdoor, detection_stats
+
+
+def make_json_serializable(obj):
+    """Recursively convert tensors and numpy types to native Python types for JSON serialization."""
+    # Torch tensor
+    if isinstance(obj, torch.Tensor):
+        try:
+            if obj.numel() == 1:
+                return obj.item()
+            return obj.detach().cpu().tolist()
+        except Exception:
+            return str(obj)
+    # Numpy scalar/array
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    if isinstance(obj, (np.integer, np.floating)):
+        return obj.item()
+    # Dictionary
+    if isinstance(obj, dict):
+        return {k: make_json_serializable(v) for k, v in obj.items()}
+    # List / tuple
+    if isinstance(obj, (list, tuple)):
+        return [make_json_serializable(v) for v in obj]
+    # Other types - return as-is (JSON will error if not serializable)
+    return obj
+
+
 def get_anp_network(
     model_name: str,
     num_classes: int = 10,
@@ -226,6 +349,12 @@ def get_anp_network(
         net = anp_model.mobilenet_anp.mobilenet_v3_large(num_classes= num_classes, **kwargs)
     elif model_name == 'efficientnet_b3':
         net = anp_model.eff_anp.efficientnet_b3(num_classes= num_classes, **kwargs)
+    elif model_name == 'resnet18_xai':
+        from models.resnet_xai import resnet18
+        net = resnet18(num_classes=num_classes, norm_layer=kwargs.get('norm_layer', anp_model.NoisyBatchNorm2d))
+    elif model_name == 'resnet18_xai_celeba':
+        from models.resnet_xai_celeba import resnet18
+        net = resnet18(num_classes=num_classes, norm_layer=kwargs.get('norm_layer', anp_model.NoisyBatchNorm2d))
     elif model_name == 'convnext_tiny':
         # net_from_imagenet = convnext_tiny(pretrained=True) #num_classes = num_classes)
         try :
@@ -271,28 +400,20 @@ def read_data(file_name):
     return mask_values
 
 
-def pruning(net, neuron):
-    state_dict = net.state_dict()
-    weight_name = '{}.{}'.format(neuron[0], 'weight')
-    state_dict[weight_name][int(neuron[1])] = 0.0
-    net.load_state_dict(state_dict)
-
-
-
-
-
 class anp(defense):
-    r"""Adversarial Neuron Pruning Purifies Backdoored Deep Models
+    r"""Adversarial Neuron Pruning for Backdoor Detection (Detection Only)
     
     basic structure: 
     
     1. config args, save_path, fix random seed
-    2. load the backdoor attack data and backdoor test data
-    3. load the backdoor attack model
-    4. anp defense:
-        a. train the mask of old model
-        b. prune the model depend on the mask
-    5. test the result and get ASR, ACC, RC 
+    2. load the clean test data (NO backdoor data needed)
+    3. load the model to analyze
+    4. anp detection:
+        a. train the mask of model using clean data
+        b. analyze mask value distribution for outlier detection
+        c. determine if model is backdoored based on mask statistics
+        d. save detection results to JSON file and stop
+    5. NO mitigation/pruning is performed
        
     .. code-block:: python
     
@@ -321,18 +442,15 @@ class anp(defense):
         anp_eps (float): the epsilon for the anp defense in the first step to train the mask
         anp_steps (int): the training steps for the anp defense in the first step to train the mask
         anp_alpha (float): the alpha for the anp defense in the first step to train the mask for the loss
-        pruning_by (str): the method for pruning, number or threshold
-        pruning_max (float): the maximum number/threshold for pruning
-        pruning_step (float): the step size for evaluating the pruning
-        pruning_number (float): the default number/threshold for pruning
         index (str): the index of the clean data
-        acc_ratio (float): the tolerance ration of the clean accuracy
         ratio (float): the ratio of clean data loader
         print_every (int): print results every few iterations
         nb_iter (int): the number of iterations for training
 
     Update:
-        All threshold evaluation results will be saved in the save_path folder as a picture, and the selected fixed threshold model results will be saved to defense_result.pt
+        This version focuses on detection only. No mitigation/pruning is performed.
+        Results are saved to detection_result.json in the save_path directory.
+        The detection is based on analyzing the distribution of learned mask values.
 
         
     """ 
@@ -391,8 +509,7 @@ class anp(defense):
         parser.add_argument('--random_seed', type=int, help='random seed')
         parser.add_argument('--yaml_path', type=str, default="./config/defense/anp/config.yaml", help='the path of yaml')
 
-        #set the parameter for the anp defense
-        parser.add_argument('--acc_ratio', type=float, help='the tolerance ration of the clean accuracy')
+        # set the parameter for the anp detection (mitigation parameters removed)
         parser.add_argument('--ratio', type=float, help='the ratio of clean data loader')
         parser.add_argument('--print_every', type=int, help='print results every few iterations')
         parser.add_argument('--nb_iter', type=int, help='the number of iterations for training')
@@ -401,19 +518,30 @@ class anp(defense):
         parser.add_argument('--anp_steps', type=int)
         parser.add_argument('--anp_alpha', type=float)
 
-        parser.add_argument('--pruning_by', type=str, choices=['number', 'threshold'])
-        parser.add_argument('--pruning_max', type=float, help='the maximum number/threshold for pruning')
-        parser.add_argument('--pruning_step', type=float, help='the step size for evaluating the pruning')
-
-        parser.add_argument('--pruning_number', type=float, help='the default number/threshold for pruning')
-
         parser.add_argument('--index', type=str, help='index of clean data')
+        # allow using a separate clean-record (same behavior as nc)
+        parser.add_argument('--result_file_clean', type=str, help='the location of a clean record to use instead of the attack record')
+        parser.add_argument('--use_clean_file', type=lambda x: str(x) in ['True', 'true', '1'], help='whether to use the clean record specified by --result_file_clean')
+        
+        # Detection parameters
+        parser.add_argument('--detection_method', type=str, default='mad', choices=['mad', 'percentile'], 
+                          help='method for outlier detection on mask values')
+        parser.add_argument('--mad_threshold', type=float, default=2.0,
+                          help='MAD threshold for detecting backdoor (default: 2.0)')
+        parser.add_argument('--mad_epsilon', type=float, default=1e-6,
+                          help='minimum MAD value to avoid division by tiny MAD')
+        parser.add_argument('--percentile_cutoff', type=float, default=5.0,
+                          help='percentile (0-100) used by percentile detection method')
+        parser.add_argument('--low_mask_ratio_threshold', type=float, default=0.02,
+                          help='fraction of neurons below percentile cutoff to flag backdoor')
 
 
 
     def set_result(self, result_file):
         attack_file = 'record/' + result_file
-        save_path = 'record/' + result_file + '/defense/anp/'
+        clean_file = 'record/' + (self.args.result_file_clean if 'result_file_clean' in self.args.__dict__ else '')
+        # If use_clean_file is True, prefer saving to the clean record folder, otherwise to the attack record folder
+        save_path = 'record/' + self.args.result_file_clean + '/defense/anp/' if (hasattr(self.args, 'use_clean_file') and self.args.use_clean_file) else 'record/' + result_file + '/defense/anp/'
         if not (os.path.exists(save_path)):
             os.makedirs(save_path)
         # assert(os.path.exists(save_path))    
@@ -426,7 +554,27 @@ class anp(defense):
             self.args.log = save_path + 'log/'
             if not (os.path.exists(self.args.log)):
                 os.makedirs(self.args.log)  
-        self.result = load_attack_result(attack_file + '/attack_result.pt')
+        # Load the clean record if requested (mirrors nc behavior)
+        if hasattr(self.args, 'use_clean_file') and self.args.use_clean_file and hasattr(self.args, 'result_file_clean') and self.args.result_file_clean is not None:
+            try:
+                self.result_clean = load_attack_result(clean_file + '/clean_model.pt')
+            except Exception:
+                # fallback: try to load a generic saved file
+                try:
+                    self.result_clean = load_attack_result(clean_file + '/attack_result.pt')
+                except Exception:
+                    logging.warning('Failed to load clean record from %s', clean_file)
+                    self.result_clean = None
+        # Always load the attack record as well
+        try:
+            self.result = load_attack_result(attack_file + '/attack_result.pt')
+        except Exception:
+            # fallback: try to load a generic saved file (e.g., clean_model.pt)
+            try:
+                self.result = load_attack_result(attack_file + '/clean_model.pt')
+            except Exception:
+                logging.warning('Failed to load attack record from %s', attack_file)
+                self.result = None
         
     def set_trainer(self, model):
         self.trainer = PureCleanModelTrainer(
@@ -465,239 +613,18 @@ class anp(defense):
             ) if torch.cuda.is_available() else "cpu"
         )
     
-    def evaluate_by_number(self, args, model, mask_values, pruning_max, pruning_step, criterion,test_dataloader_dict, best_asr, acc_ori, save = True):
-        results = []
-        nb_max = int(np.ceil(pruning_max))
-        nb_step = int(np.ceil(pruning_step))
-        model_best = copy.deepcopy(model)
-
-        number_list = []
-        clean_test_loss_list = []
-        bd_test_loss_list = []
-        test_acc_list = []
-        test_asr_list = []
-        test_ra_list = []
-
-        agg = Metric_Aggregator()
-        for start in range(0, nb_max + 1, nb_step):
-            i = start
-            for i in range(start, start + nb_step):
-                pruning(model, mask_values[i])
-            layer_name, neuron_idx, value = mask_values[i][0], mask_values[i][1], mask_values[i][2]
-            # cl_loss, cl_acc = test(args, model=model, criterion=criterion, data_loader=clean_loader)
-            # po_loss, po_acc = test(args, model=model, criterion=criterion, data_loader=poison_loader)
-            # logging.info('{} \t {} \t {} \t {} \t {:.4f} \t {:.4f} \t {:.4f} \t {:.4f}'.format(
-            #     i+1, layer_name, neuron_idx, value, po_loss, po_acc, cl_loss, cl_acc))
-            # results.append('{} \t {} \t {} \t {} \t {:.4f} \t {:.4f} \t {:.4f} \t {:.4f}'.format(
-            #     i+1, layer_name, neuron_idx, value, po_loss, po_acc, cl_loss, cl_acc))    
-            self.set_trainer(model)
-            self.trainer.set_with_dataloader(
-                ### the train_dataload has nothing to do with the backdoor defense
-                train_dataloader = test_dataloader_dict['bd_test_dataloader'],
-                test_dataloader_dict = test_dataloader_dict,
-
-                criterion = criterion,
-                optimizer = None,
-                scheduler = None,
-                device = self.args.device,
-                amp = self.args.amp,
-
-                frequency_save = self.args.frequency_save,
-                save_folder_path = self.args.save_path,
-                save_prefix = 'anp',
-
-                prefetch = self.args.prefetch,
-                prefetch_transform_attr_name = "ori_image_transform_in_loading",
-                non_blocking = self.args.non_blocking,
-
-
-                )
-            clean_test_loss_avg_over_batch, \
-                    bd_test_loss_avg_over_batch, \
-                    test_acc, \
-                    test_asr, \
-                    test_ra = self.trainer.test_current_model(
-                test_dataloader_dict, args.device,
-            )
-            number_list.append(start)
-            clean_test_loss_list.append(clean_test_loss_avg_over_batch)
-            bd_test_loss_list.append(bd_test_loss_avg_over_batch)
-            test_acc_list.append(test_acc)
-            test_asr_list.append(test_asr)
-            test_ra_list.append(test_ra)
-            # cl_loss, cl_acc = test(args, model=model, criterion=criterion, data_loader=clean_loader)
-            # po_loss, po_acc = test(args, model=model, criterion=criterion, data_loader=poison_loader)
-            # logging.info('{:.2f} \t {} \t {} \t {} \t {:.4f} \t {:.4f} \t {:.4f} \t {:.4f}'.format(
-            #     start, layer_name, neuron_idx, threshold, po_loss, po_acc, cl_loss, cl_acc))
-            # results.append('{:.2f} \t {} \t {} \t {} \t {:.4f} \t {:.4f} \t {:.4f} \t {:.4f}\n'.format(
-            #     start, layer_name, neuron_idx, threshold, po_loss, po_acc, cl_loss, cl_acc))
-            if save:
-                agg({
-                    'number': start,
-                    # 'layer_name': layer_name,
-                    # 'neuron_idx': neuron_idx,
-                    'value': value,
-                    "clean_test_loss_avg_over_batch": clean_test_loss_avg_over_batch,
-                    "bd_test_loss_avg_over_batch": bd_test_loss_avg_over_batch,
-                    "test_acc": test_acc,
-                    "test_asr": test_asr,
-                    "test_ra": test_ra,
-                })
-                general_plot_for_epoch(
-                    {
-                        "Test C-Acc": test_acc_list,
-                        "Test ASR": test_asr_list,
-                        "Test RA": test_ra_list,
-                    },
-                    save_path=f"{args.save_path}number_acc_like_metric_plots.png",
-                    ylabel="percentage",
-                )
-
-                general_plot_for_epoch(
-                    {
-                        "Test Clean Loss": clean_test_loss_list,
-                        "Test Backdoor Loss": bd_test_loss_list,
-                    },
-                    save_path=f"{args.save_path}number_loss_metric_plots.png",
-                    ylabel="percentage",
-                )
-
-                general_plot_for_epoch(
-                    {
-                        "number": number_list,
-                    },
-                    save_path=f"{args.save_path}number_plots.png",
-                    ylabel="percentage",
-                )
-
-                agg.to_dataframe().to_csv(f"{args.save_path}number_df.csv")
-            if abs(test_acc - acc_ori)/acc_ori < args.acc_ratio:
-                if test_asr < best_asr:
-                    model_best = copy.deepcopy(model)
-                    best_asr = test_asr
-        return results, model_best
-
-
-    def evaluate_by_threshold(self, args, model, mask_values, pruning_max, pruning_step, criterion, test_dataloader_dict, best_asr, acc_ori, save = True):
-        results = []
-        thresholds = np.arange(0, pruning_max + pruning_step, pruning_step)
-        start = 0
-        model_best = copy.deepcopy(model)
-
-        clean_test_loss_list = []
-        bd_test_loss_list = []
-        test_acc_list = []
-        test_asr_list = []
-        test_ra_list = []
-
-        agg = Metric_Aggregator()
-        for threshold in thresholds:
-            idx = start
-            for idx in range(start, len(mask_values)):
-                if float(mask_values[idx][2]) <= threshold:
-                    pruning(model, mask_values[idx])
-                    start += 1
-                else:
-                    break
-            layer_name, neuron_idx, value = mask_values[idx][0], mask_values[idx][1], mask_values[idx][2]
-            self.set_trainer(model)
-            self.trainer.set_with_dataloader(
-                ### the train_dataload has nothing to do with the backdoor defense
-                train_dataloader = test_dataloader_dict['bd_test_dataloader'],
-                test_dataloader_dict = test_dataloader_dict,
-
-                criterion = criterion,
-                optimizer = None,
-                scheduler = None,
-                device = self.args.device,
-                amp = self.args.amp,
-
-                frequency_save = self.args.frequency_save,
-                save_folder_path = self.args.save_path,
-                save_prefix = 'anp',
-
-                prefetch = self.args.prefetch,
-                prefetch_transform_attr_name = "ori_image_transform_in_loading",
-                non_blocking = self.args.non_blocking,
-
-
-                )
-            clean_test_loss_avg_over_batch, \
-                    bd_test_loss_avg_over_batch, \
-                    test_acc, \
-                    test_asr, \
-                    test_ra = self.trainer.test_current_model(
-                test_dataloader_dict, args.device,
-            )
-            clean_test_loss_list.append(clean_test_loss_avg_over_batch)
-            bd_test_loss_list.append(bd_test_loss_avg_over_batch)
-            test_acc_list.append(test_acc)
-            test_asr_list.append(test_asr)
-            test_ra_list.append(test_ra)
-            # cl_loss, cl_acc = test(args, model=model, criterion=criterion, data_loader=clean_loader)
-            # po_loss, po_acc = test(args, model=model, criterion=criterion, data_loader=poison_loader)
-            # logging.info('{:.2f} \t {} \t {} \t {} \t {:.4f} \t {:.4f} \t {:.4f} \t {:.4f}'.format(
-            #     start, layer_name, neuron_idx, threshold, po_loss, po_acc, cl_loss, cl_acc))
-            # results.append('{:.2f} \t {} \t {} \t {} \t {:.4f} \t {:.4f} \t {:.4f} \t {:.4f}\n'.format(
-            #     start, layer_name, neuron_idx, threshold, po_loss, po_acc, cl_loss, cl_acc))
-            if save:
-                agg({
-                    'threshold': threshold,
-                    # 'layer_name': layer_name,
-                    # 'neuron_idx': neuron_idx,
-                    'value': value,
-                    "clean_test_loss_avg_over_batch": clean_test_loss_avg_over_batch,
-                    "bd_test_loss_avg_over_batch": bd_test_loss_avg_over_batch,
-                    "test_acc": test_acc,
-                    "test_asr": test_asr,
-                    "test_ra": test_ra,
-                })
-                general_plot_for_epoch(
-                    {
-                        "Test C-Acc": test_acc_list,
-                        "Test ASR": test_asr_list,
-                        "Test RA": test_ra_list,
-                    },
-                    save_path=f"{args.save_path}threshold_acc_like_metric_plots.png",
-                    ylabel="percentage",
-                )
-
-                general_plot_for_epoch(
-                    {
-                        "Test Clean Loss": clean_test_loss_list,
-                        "Test Backdoor Loss": bd_test_loss_list,
-                    },
-                    save_path=f"{args.save_path}threshold_loss_metric_plots.png",
-                    ylabel="percentage",
-                )
-
-                general_plot_for_epoch(
-                    {
-                        "threshold": thresholds,
-                    },
-                    save_path=f"{args.save_path}threshold_plots.png",
-                    ylabel="percentage",
-                )
-
-                agg.to_dataframe().to_csv(f"{args.save_path}threshold_df.csv")
-            
-            if abs(test_acc - acc_ori)/acc_ori < args.acc_ratio:
-                if test_asr < best_asr:
-                    model_best = copy.deepcopy(model)
-                    best_asr = test_asr
-        return results, model_best
-
     def mitigation(self):
         self.set_devices()
         fix_random(self.args.random_seed)
 
         args = self.args
-        result = self.result
-        # a. train the mask of old model
+
+
+        # a. train the mask using ONLY clean data
         train_tran = get_transform(self.args.dataset, *([self.args.input_height,self.args.input_width]) , train = True)
         clean_dataset = prepro_cls_DatasetBD_v2(self.result['clean_train'].wrapped_dataset)
         data_all_length = len(clean_dataset)
-        ran_idx = choose_index(self.args, data_all_length) 
+        ran_idx = choose_index(self.args, data_all_length)
         log_index = self.args.log + 'index.txt'
         np.savetxt(log_index, ran_idx, fmt='%d')
         clean_dataset.subset(ran_idx)
@@ -705,27 +632,20 @@ class anp(defense):
         data_set_clean = self.result['clean_train']
         data_set_clean.wrapped_dataset = data_set_without_tran
         data_set_clean.wrap_img_transform = train_tran
-        # data_set_clean.wrapped_dataset.getitem_all = False
         random_sampler = RandomSampler(data_source=data_set_clean, replacement=True,
-                                    num_samples=args.print_every * args.batch_size)
+                                       num_samples=args.print_every * args.batch_size)
         clean_val_loader = DataLoader(data_set_clean, batch_size=args.batch_size,
-                                    shuffle=False, sampler=random_sampler, num_workers=0)
-        
-        test_tran = get_transform(self.args.dataset, *([self.args.input_height,self.args.input_width]) , train = False)
-        data_bd_testset = self.result['bd_test']
-        data_bd_testset.wrap_img_transform = test_tran
-        # data_bd_testset.wrapped_dataset.getitem_all = False
-        poison_test_loader = DataLoader(data_bd_testset, batch_size=args.batch_size, num_workers=args.num_workers,drop_last=False, shuffle=True,pin_memory=True)
+                                      shuffle=False, sampler=random_sampler, num_workers=0)
 
         test_tran = get_transform(self.args.dataset, *([self.args.input_height,self.args.input_width]) , train = False)
         data_clean_testset = self.result['clean_test']
+
         data_clean_testset.wrap_img_transform = test_tran
         clean_test_loader = DataLoader(data_clean_testset, batch_size=args.batch_size, num_workers=args.num_workers,drop_last=False, shuffle=True,pin_memory=True)
-
-        test_dataloader_dict = {}
-        test_dataloader_dict["clean_test_dataloader"] = clean_test_loader
-        test_dataloader_dict["bd_test_dataloader"] = poison_test_loader
-        state_dict = self.result['model']
+        if hasattr(self.args, 'use_clean_file') and self.args.use_clean_file and hasattr(self, 'result_clean') and self.result_clean is not None:
+            state_dict = self.result_clean
+        else:
+            state_dict = self.result['model']
         net = get_anp_network(args.model, num_classes=args.num_classes, norm_layer=anp_model.NoisyBatchNorm2d)
         load_state_dict(net, orig_state_dict=state_dict)
         net = net.to(args.device)
@@ -737,7 +657,8 @@ class anp(defense):
         noise_params = [v for n, v in parameters if "neuron_noise" in n]
         noise_optimizer = torch.optim.SGD(noise_params, lr=args.anp_eps / args.anp_steps)
 
-        logging.info('Iter \t lr \t Time \t TrainLoss \t TrainACC \t PoisonLoss \t PoisonACC \t CleanLoss \t CleanACC')
+        logging.info('Training neuron masks using clean data only...')
+        logging.info('Iter \t lr \t Time \t TrainLoss \t TrainACC \t CleanTestLoss \t CleanTestACC')
         nb_repeat = int(np.ceil(args.nb_iter / args.print_every))
         for i in range(nb_repeat):
             start = time.time()
@@ -745,148 +666,45 @@ class anp(defense):
             train_loss, train_acc = mask_train(args, model=net, criterion=criterion, data_loader=clean_val_loader,
                                             mask_opt=mask_optimizer, noise_opt=noise_optimizer)
             cl_test_loss, cl_test_acc = test(args, model=net, criterion=criterion, data_loader=clean_test_loader)
-            po_test_loss, po_test_acc = test(args, model=net, criterion=criterion, data_loader=poison_test_loader)
             end = time.time()
-            logging.info('{} \t {:.3f} \t {:.1f} \t {:.4f} \t {:.4f} \t {:.4f} \t {:.4f} \t {:.4f} \t {:.4f}'.format(
-                (i + 1) * args.print_every, lr, end - start, train_loss, train_acc, po_test_loss, po_test_acc,
+            logging.info('{} \t {:.3f} \t {:.1f} \t {:.4f} \t {:.4f} \t {:.4f} \t {:.4f}'.format(
+                (i + 1) * args.print_every, lr, end - start, train_loss, train_acc,
                 cl_test_loss, cl_test_acc))
+        
         save_mask_scores(net.state_dict(), os.path.join(args.checkpoint_save, 'mask_values.txt'))
+        logging.info(f'Mask values saved to {args.checkpoint_save}mask_values.txt')
 
-        # b. prune the model depend on the mask
-        net_prune = generate_cls_model(args.model,args.num_classes)
-        net_prune.load_state_dict(result['model'])
-        net_prune.to(args.device)
-
+        # b. Analyze mask values for backdoor detection
         mask_values = read_data(args.checkpoint_save + 'mask_values.txt')
-        mask_values = sorted(mask_values, key=lambda x: float(x[2]))
-        logging.info('No. \t Layer Name \t Neuron Idx \t Mask \t PoisonLoss \t PoisonACC \t CleanLoss \t CleanACC')
-        cl_loss, cl_acc = test(args, model=net_prune, criterion=criterion, data_loader=clean_test_loader)
-        po_loss, po_acc = test(args, model=net_prune, criterion=criterion, data_loader=poison_test_loader)
-        logging.info('0 \t None     \t None     \t {:.4f} \t {:.4f} \t {:.4f} \t {:.4f}'.format(po_loss, po_acc, cl_loss, cl_acc))
-
-        model = copy.deepcopy(net_prune)
-        if args.pruning_by == 'threshold':
-            results, model_pru = self.evaluate_by_threshold(
-                args, net_prune, mask_values, pruning_max=args.pruning_max, pruning_step=args.pruning_step,
-                criterion=criterion, test_dataloader_dict=test_dataloader_dict, best_asr=po_acc, acc_ori=cl_acc
-            )
-        else:
-            results, model_pru = self.evaluate_by_number(
-                args, net_prune, mask_values, pruning_max=args.pruning_max, pruning_step=args.pruning_step,
-                criterion=criterion, test_dataloader_dict=test_dataloader_dict, best_asr=po_acc, acc_ori=cl_acc
-            )
-        file_name = os.path.join(args.checkpoint_save, 'pruning_by_{}.txt'.format(args.pruning_by))
-        with open(file_name, "w") as f:
-            f.write('No \t Layer Name \t Neuron Idx \t Mask \t PoisonLoss \t PoisonACC \t CleanLoss \t CleanACC\n')
-            f.writelines(results)
-
-        if 'pruning_number' in args.__dict__: 
-            if args.pruning_by == 'threshold':
-                _, _ = self.evaluate_by_threshold(
-                    args, model, mask_values, pruning_max=args.pruning_number, pruning_step=args.pruning_number,
-                    criterion=criterion, test_dataloader_dict=test_dataloader_dict, best_asr=po_acc, acc_ori=cl_acc, save=False
-                )
-            else:
-                _, _ = self.evaluate_by_number(
-                    args, model, mask_values, pruning_max=args.pruning_number, pruning_step=args.pruning_number,
-                    criterion=criterion, test_dataloader_dict=test_dataloader_dict, best_asr=po_acc, acc_ori=cl_acc, save=False
-                )
-            self.set_trainer(model)
-            self.trainer.set_with_dataloader(
-                ### the train_dataload has nothing to do with the backdoor defense
-                train_dataloader = clean_val_loader,
-                test_dataloader_dict = test_dataloader_dict,
-
-                criterion = criterion,
-                optimizer = None,
-                scheduler = None,
-                device = self.args.device,
-                amp = self.args.amp,
-
-                frequency_save = self.args.frequency_save,
-                save_folder_path = self.args.save_path,
-                save_prefix = 'anp',
-
-                prefetch = self.args.prefetch,
-                prefetch_transform_attr_name = "ori_image_transform_in_loading",
-                non_blocking = self.args.non_blocking,
-
-
-                )
-            agg = Metric_Aggregator()
-            clean_test_loss_avg_over_batch, \
-                    bd_test_loss_avg_over_batch, \
-                    test_acc, \
-                    test_asr, \
-                    test_ra = self.trainer.test_current_model(
-                test_dataloader_dict, self.args.device,
-            )
-            agg({
-                    "clean_test_loss_avg_over_batch": clean_test_loss_avg_over_batch,
-                    "bd_test_loss_avg_over_batch": bd_test_loss_avg_over_batch,
-                    "test_acc": test_acc,
-                    "test_asr": test_asr,
-                    "test_ra": test_ra,
-                })
-            agg.to_dataframe().to_csv(f"{args.save_path}anp_df_summary.csv")
-            result = {}
-            result['model'] = model
-            save_defense_result(
-                model_name=args.model,
-                num_classes=args.num_classes,
-                model=model_pru.cpu().state_dict(),
-                save_path=args.save_path,
-            )
-
-            return result
-
-        self.set_trainer(model_pru)
-        self.trainer.set_with_dataloader(
-            ### the train_dataload has nothing to do with the backdoor defense
-            train_dataloader = clean_val_loader,
-            test_dataloader_dict = test_dataloader_dict,
-
-            criterion = criterion,
-            optimizer = None,
-            scheduler = None,
-            device = self.args.device,
-            amp = self.args.amp,
-
-            frequency_save = self.args.frequency_save,
-            save_folder_path = self.args.save_path,
-            save_prefix = 'anp',
-
-            prefetch = self.args.prefetch,
-            prefetch_transform_attr_name = "ori_image_transform_in_loading",
-            non_blocking = self.args.non_blocking,
-
-
-            )
-        agg = Metric_Aggregator()
-        clean_test_loss_avg_over_batch, \
-                bd_test_loss_avg_over_batch, \
-                test_acc, \
-                test_asr, \
-                test_ra = self.trainer.test_current_model(
-            test_dataloader_dict, self.args.device,
-        )
-        agg({
-                "clean_test_loss_avg_over_batch": clean_test_loss_avg_over_batch,
-                "bd_test_loss_avg_over_batch": bd_test_loss_avg_over_batch,
-                "test_acc": test_acc,
-                "test_asr": test_asr,
-                "test_ra": test_ra,
-            })
-        agg.to_dataframe().to_csv(f"{args.save_path}anp_df_summary.csv")
-        result = {}
-        result['model'] = model_pru
-        save_defense_result(
-            model_name=args.model,
-            num_classes=args.num_classes,
-            model=model_pru.cpu().state_dict(),
-            save_path=args.save_path,
-        )
-        return result
+        
+        # Extract just the numerical mask values for analysis
+        mask_values_only = [float(x[2]) for x in mask_values]
+        
+        logging.info(f'Analyzing {len(mask_values_only)} neuron mask values for backdoor detection...')
+        
+        # Perform outlier detection on mask values
+        is_backdoor, detection_stats = detect_backdoor_from_masks(mask_values_only, args)
+        
+        # Prepare detection result
+        detection_result = {
+            "is_backdoor": is_backdoor,
+            "dataset": args.dataset,
+            "model": args.model,
+            "num_neurons_analyzed": len(mask_values_only),
+            "detection_statistics": detection_stats,
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+        }
+        
+        # Save detection results to JSON
+        json_output_path = os.path.join(args.save_path, "detection_result.json")
+        with open(json_output_path, "w") as f:
+            json.dump(make_json_serializable(detection_result), f, indent=4)
+        
+        logging.info(f"Detection result saved to {json_output_path}")
+        logging.info(f"Is backdoor detected: {is_backdoor}")
+        
+        # Return detection result (no model pruning/mitigation)
+        return detection_result
 
     def defense(self,result_file):
         self.set_result(result_file)

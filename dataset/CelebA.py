@@ -13,6 +13,7 @@ Note that if you get error due to download part, you may need to download CelebA
     since the official implementation use googledrive which limit daily access amount.
 """
 
+import torch
 import torchvision
 
 import torch.utils.data as data
@@ -25,7 +26,9 @@ class CelebA_attr(data.Dataset):
         self.split = split
 
     def _convert_attributes(self, bool_attributes):
-        return (bool_attributes[0] << 2) + (bool_attributes[1] << 1) + (bool_attributes[2])
+        # Convert tensor elements to Python int to avoid 0-d tensor issues
+        result = (int(bool_attributes[0]) << 2) + (int(bool_attributes[1]) << 1) + int(bool_attributes[2])
+        return result
 
     def __len__(self):
         return len(self.dataset)
@@ -35,6 +38,8 @@ class CelebA_attr(data.Dataset):
         if self.transform is not None:
             input = self.transform(input)
         target = self._convert_attributes(target[self.list_attributes])
+        # Return target as Python int, not tensor
+        # The DataLoader's collate_fn will convert to tensor
         return (input, target)
 
 
