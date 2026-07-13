@@ -485,85 +485,45 @@ class strip(defense):
             if i < len(labels_poison):
                 true_index[i] = 1
 
-        if len(suspect_index)==0:
-            tn = len(true_index) - np.sum(true_index)
-            fp = np.sum(true_index)
-            fn = 0
-            tp = 0
-            TPR = 0
-            FPR = 0
-            precision = 0
-            acc = (tp + tn) / (tn + fp + fn + tp) if (tn + fp + fn + tp) != 0 else 0
-            summary = {
-                'dataset': self.args.dataset,
-                'attack_name': getattr(self.args, 'attack_name', None) or getattr(self.args, 'result_file', None) or 'unknown',
-                'record': getattr(self.args, 'result_file', None),
-                'checkpoint_path': getattr(self.args, 'checkpoint_path', None),
-                'poisoned_data_path': getattr(self.args, 'poisoned_data_path', None),
-                'TN': int(tn),
-                'FP': int(fp),
-                'FN': int(fn),
-                'TP': int(tp),
-                'TPR': float(TPR),
-                'FPR': float(FPR),
-                'precision': float(precision),
-                'acc': float(acc),
-                'threshold_low': float(getattr(worker, 'threshold_low', float('nan'))),
-                'threshold_high': None if np.isinf(getattr(worker, 'threshold_high', np.inf)) else float(getattr(worker, 'threshold_high', np.inf)),
-                'clean_sample_num': int(self.args.clean_sample_num),
-                'strip_alpha': float(worker.strip_alpha),
-                'N': int(worker.N),
-                'defense_fpr': float(worker.defense_fpr),
-                'suspected_count': int(len(suspect_index)),
-                'poisoned_count': int(len(images_poison)),
-                'clean_detect_count': int(len(images_clean)),
-                'elapsed_seconds': float(time.perf_counter() - start),
-            }
-        else:    
-            findex = np.zeros(len(detected_samples))
-            for i in range(len(findex)):
-                if i in suspect_index:
-                    findex[i] = 1
+        findex = np.zeros(len(detected_samples))
+        for i in range(len(findex)):
+            if i in suspect_index:
+                findex[i] = 1
 
-            tn, fp, fn, tp = self.cal(true_index, findex)
-            TPR, FPR, precision, acc = self.metrix(tn, fp, fn, tp)
-
-            new_TP = tp
-            new_FN = fn*9
-            new_FP = fp*1
-            precision = new_TP / (new_TP + new_FP) if new_TP + new_FP != 0 else 0
-            recall = new_TP / (new_TP + new_FN) if new_TP + new_FN != 0 else 0
-            fw1 = 2*(precision * recall)/ (precision + recall) if precision + recall != 0 else 0
-            end = time.perf_counter()
-            time_miniute = (end-start)/60
-            summary = {
-                'dataset': self.args.dataset,
-                'attack_name': getattr(self.args, 'attack_name', None) or getattr(self.args, 'result_file', None) or 'unknown',
-                'record': getattr(self.args, 'result_file', None),
-                'checkpoint_path': getattr(self.args, 'checkpoint_path', None),
-                'poisoned_data_path': getattr(self.args, 'poisoned_data_path', None),
-                'TN': int(tn),
-                'FP': int(fp),
-                'FN': int(fn),
-                'TP': int(tp),
-                'TPR': float(TPR),
-                'FPR': float(FPR),
-                'precision': float(precision),
-                'acc': float(acc),
-                'recall': float(recall),
-                'f1': float(fw1),
-                'threshold_low': float(getattr(worker, 'threshold_low', float('nan'))),
-                'threshold_high': None if np.isinf(getattr(worker, 'threshold_high', np.inf)) else float(getattr(worker, 'threshold_high', np.inf)),
-                'clean_sample_num': int(self.args.clean_sample_num),
-                'strip_alpha': float(worker.strip_alpha),
-                'N': int(worker.N),
-                'defense_fpr': float(worker.defense_fpr),
-                'suspected_count': int(len(suspect_index)),
-                'poisoned_count': int(len(images_poison)),
-                'clean_detect_count': int(len(images_clean)),
-                'elapsed_seconds': float(end - start),
-                'elapsed_minutes': float(time_miniute),
-            }
+        tn, fp, fn, tp = self.cal(true_index, findex)
+        TPR, FPR, precision, acc = self.metrix(tn, fp, fn, tp)
+        recall = tp / (tp + fn) if tp + fn != 0 else 0
+        fw1 = 2 * (precision * recall) / (precision + recall) if precision + recall != 0 else 0
+        end = time.perf_counter()
+        time_miniute = (end - start) / 60
+        summary = {
+            'dataset': self.args.dataset,
+            'attack_name': getattr(self.args, 'attack_name', None) or getattr(self.args, 'result_file', None) or 'unknown',
+            'record': getattr(self.args, 'result_file', None),
+            'checkpoint_path': getattr(self.args, 'checkpoint_path', None),
+            'poisoned_data_path': getattr(self.args, 'poisoned_data_path', None),
+            'TN': int(tn),
+            'FP': int(fp),
+            'FN': int(fn),
+            'TP': int(tp),
+            'TPR': float(TPR),
+            'FPR': float(FPR),
+            'precision': float(precision),
+            'acc': float(acc),
+            'recall': float(recall),
+            'f1': float(fw1),
+            'threshold_low': float(getattr(worker, 'threshold_low', float('nan'))),
+            'threshold_high': None if np.isinf(getattr(worker, 'threshold_high', np.inf)) else float(getattr(worker, 'threshold_high', np.inf)),
+            'clean_sample_num': int(self.args.clean_sample_num),
+            'strip_alpha': float(worker.strip_alpha),
+            'N': int(worker.N),
+            'defense_fpr': float(worker.defense_fpr),
+            'suspected_count': int(len(suspect_index)),
+            'poisoned_count': int(len(images_poison)),
+            'clean_detect_count': int(len(images_clean)),
+            'elapsed_seconds': float(end - start),
+            'elapsed_minutes': float(time_miniute),
+        }
 
         summary_path = os.path.join(self.args.save_path, 'detection_result.json')
         with open(summary_path, 'w', encoding='utf-8') as f:
